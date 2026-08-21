@@ -1,7 +1,7 @@
-//My vector, no AI except if said so
+//My vector, guided by AI but not written by AI
 
 // Yet to be understood
-// you only need cleanup where a failure would leave the invariant broken 
+// you only need cleanup where a failure would leave the invariant broken / understand exactly where catch + throw + destroy is needed or not
 //Explicit keyword, and not on copy ctor
 //noexcept keyword on move ctor
 //understand         if (this == &other) return *this OK
@@ -207,22 +207,15 @@ class vector{
         if (size_<other.size_){ //Never happens if reallocated
 
             //= for first elements, no state lie
-
-            try{
             for (size_type i =0;i<size_; i++){ // no catch for =
                 data_[i] = other[i]; //= operator on already initialized element
             }
-            } catch (...){
-                throw;
-            }
+       
 
             //new ctr for after elements
-             try{
+   
             for (;size_<other.size_; size_++){
                 new (data_+size_) T(other[size_]); 
-            }
-            } catch(...){
-                throw;
             }
         }
         else{
@@ -232,15 +225,10 @@ class vector{
                 data_[i].~T(); // will not throw
             }
 
-            try{
-                for (size_type i=0;i<other.size_; i++){ // no catch for =
-                    data_[i] = other[i]; //= operator on already initialized element
-                }
-            } catch(...){
-                throw; //No destroy ! because state is still valid
+            //No destroy ! because state is still valid
+            for (size_type i=0;i<other.size_; i++){ // no catch for =
+                data_[i] = other[i]; //= operator on already initialized element
             }
-
-       
 
             size_=other.size_;
           
@@ -335,8 +323,8 @@ class vector{
             //choice: new items that are > size but < capacity are no even initialized ?
             try {
                 for (;built<size_; built++){ 
-                // new (new_ptr+built) T(data_[built]); //Default initialized mistake because it rebuilds !! same as intervie
-                    new (new_ptr + built) T(std::move_if_noexcept(data_[built])); // calls the move constructor, no rebuild
+                // new (new_ptr+built) T(data_[built]); //Default initialized mistake because it rebuilds !! same as interview
+                    new (new_ptr + built) T(std::move_if_noexcept(data_[built])); // calls the move constructor, no rebuild (AI this one)
             }
             } catch(...){
                 for (size_type j = 0; j < built; ++j) new_ptr[j].~T();
