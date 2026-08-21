@@ -1,4 +1,10 @@
-//My vector
+//My vector, no AI
+
+// Yet to be understood
+// you only need cleanup where a failure would leave the invariant broken OK
+//Explicit keyword, and not on copy ctor
+//noexcept keyword on move ctor
+//understand         if (this == &other) return *this OK
 
 template<class T, class Allocator = std::allocator<T> /*#?#*/> 
 class vector{
@@ -31,7 +37,7 @@ class vector{
                 new (data_+size_) T(); //Default initialized
             }
         } catch(...){
-            partial_destruction();
+            destroy_all_and_throw();
         }
 
     }
@@ -54,12 +60,12 @@ class vector{
                 new (data_+size_) T(value); //This construct the object T at the desired location but it coult fail T(value) might throw.
             }
         } catch(...){
-            partial_destruction();
+            destroy_all_and_throw();
         }
     }
 
     //Copy ctor 
-    explicit vector( const vector& other ): data_(nullptr), size_(0), capacity_(0) { //explicit: no conversion in type deduction
+    vector( const vector& other ): data_(nullptr), size_(0), capacity_(0) { //explicit: no conversion in type deduction
 
         T* ptr = allocate_raw(other.size_);
         if (!ptr){
@@ -68,18 +74,17 @@ class vector{
             data_=ptr;
         }
 
-        capacity_=other.capacity_;
+        capacity_=other.size_;
 
         try {
             for (;size_<other.size_; size_++){
                 new (data_+size_) T(other[size_]); 
         }
         } catch(...){
-            partial_destruction();
+            destroy_all_and_throw();
         }
     }
     
-    //noexcept: cannot throw + something for push back TODO
     //takes a r-value reference AKA an object that is ABOUT to be destroyed
     vector( vector&& other ) noexcept : data_(other.data_), size_(other.size_), capacity_(other.capacity_){
 
@@ -89,14 +94,10 @@ class vector{
         other.size_=0;
         other.capacity_=0;
     }
-  
 
     //dtor
     ~vector(){
-        for (size_type i=0; i<size_; i++){
-            data_[i].~T(); //free objects to avoid leaks (ex: std::strings !!)
-        }
-        if(data_) free(data_);
+        destroy_all();
     }
 
     const size_type size() const { //const -> does not change state
@@ -125,26 +126,103 @@ class vector{
     // dont corrupt target when if throws
 
     // //deep copy from a reference
-    // vector<T>& operator=(const vector<T>& other){
+    vector<T>& operator=(const vector<T>& other){
 
-    //     if (capacity_<other.size_){
-    //         allocate_raw(other.size_);
-    //     }
+        if (this == &other) return *this;
 
-    //     capacity_=other.size_;
+        if (capacity_<other.size_){
 
-    //     try {
-    //         for (;size_<other.size_; size_++){
-    //             new (data_+size_) T(other[size_]); 
-    //     }
-    //     } catch(...){
-    //         partial_destruction();
-    //     }
+            //Build new THEN destroy THEN metadata
+            //build new
+            T* new_ptr = allocate_raw(other.size_);
+            
+            size_type built; 
+            //Could fail : = operator
+            try {
+                for (built=0;built<other.size_; built++){ 
+                    new (new_ptr+built) T(other[built]); //Default initialized
+                }
+            } catch(...){
+                for (size_type j = 0; j < built; ++j) new_ptr[j].~T();
+                free(new_ptr);
+                throw;                        // *this is completely untouched
+            }
 
-    //     return *this; //it means dereference the pointer — access the value stored at the memory address ptr points to.
+            //2 
+            destroy_all(); 
+            //3
+            data_=new_ptr; 
+            capacity_ = other.size_;
+            size_=built;
 
+            return *this;
+        }
 
-    // }
+        //here our elements are initialized until size_ 
+        if (size_<other.size_){ //Never happens if reallocated
+
+            //= for first elements, no state lie
+
+            try{
+            for (size_type i =0;i<size_; i++){ // no catch for =
+                data_[i] = other[i]; //= operator on already initialized element
+            }
+            } catch (...){
+                throw;
+            }
+
+            //new ctr for after elements
+             try{
+            for (;size_<other.size_; size_++){
+                new (data_+size_) T(other[size_]); 
+            }
+            } catch(...){
+                throw;
+            }
+        }
+        else{
+            //size_ > other.size_
+
+            for(size_type i=other.size_; i<size_; i++){ // destroy tail elements
+                data_[i].~T(); // will not throw
+            }
+
+            try{
+                for (size_type i=0;i<other.size_; i++){ // no catch for =
+                    data_[i] = other[i]; //= operator on already initialized element
+                }
+            } catch(...){
+                throw; //No destroy ! because state is still valid
+            }
+
+       
+
+            size_=other.size_;
+          
+        }
+        return *this; 
+    }
+
+    //Get rid of our stuff
+    //Take the source buffer, leave it destructible
+    vector<T>& operator=(vector<T>&& other) noexcept{
+        if (this == &other) return *this;
+
+        destroy_all();
+
+        data_=other.data_;
+        capacity_=other.capacity_;
+        size_=other.size_;
+
+        //when other's dtor is called, nothing is destroyed. We own it now.
+        // When other is destroyed, it wont free its original ptr
+        other.data_=nullptr;
+        other.size_=0;
+        other.capacity_=0;
+
+        return *this;
+    }
+
     private:
         T* data_{nullptr};
         size_type capacity_{0u};
@@ -158,10 +236,43 @@ class vector{
             return new_ptr;
         }
 
-        void partial_destruction(){
-            for (size_type j = 0; j < size_; ++j) data_[j].~T(); //Free all succesfully already initiated elements
-            free(data_);
+        //Cleanup helper 
+        void destroy_all_and_throw(){
+            destroy_all();
             throw; // program stop here, dtor never called. Okay because in a catch bloc
         }
 
+        //deconstrut until size_
+        void destroy_all() {
+            for (size_type j = 0; j < size_; ++j) data_[j].~T();
+            if (data_) free(data_);
+            data_ = nullptr;
+            size_ = 0;
+            capacity_ = 0;
+        }
+
+
+
 };
+
+/*
+#include<iostream>
+int main(){
+
+    int a =5;
+    int& b=a;
+
+    int*a_ptr = &a; //& on a value -> pointer
+
+    std::cout<<a<<std::endl;
+    std::cout<<b<<std::endl;
+    std::cout<<a_ptr<<std::endl;
+    std::cout<<&b<<std::endl; //& on a reference -> pointer
+    std::cout<<&a<<std::endl; //& on a reference -> pointer
+    std::cout<<*a_ptr<<std::endl; // *on a pointer -> object
+
+    //donc &other when other is a ref: pointer, this=pointer of the current object, *this -> object then passed by reference. same code for object return
+
+    return 0;
+}
+*/

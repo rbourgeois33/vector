@@ -98,6 +98,10 @@ struct Owning {
     std::string* p;
     explicit Owning(const char* s = "x") : p(new std::string(s)) {}
     Owning(const Owning& o) : p(new std::string(*o.p)) {}
+    Owning& operator=(const Owning& o) {
+        *p = *o.p;              // reuse the existing string, no realloc
+        return *this;
+    }
     ~Owning() { delete p; }
 };
 
@@ -671,5 +675,679 @@ TEST(MoveCtor, LargeVectorCostsNothing) {
         EXPECT_EQ(Tracked::copy_ctors, 0);
     }
     EXPECT_EQ(Tracked::live, 0);
+}
+
+
+// Copy assignment tests -- paste into vector_test.cpp after the move ctor
+// section. Reuses Tracked, ThrowOnCopy, NoDefault and Owning.
+//
+// The three branches under test:
+//   A. capacity_ < other.size_   -> reallocate (strong guarantee)
+//   B. size_ < other.size_       -> assign prefix, construct the rest (basic)
+//   C. size_ >= other.size_      -> assign prefix, destroy the tail (basic)
+
+#include <utility>
+
+// Throws from operator= after `budget` successful assignments. The copy ctor
+// never throws, so only the reuse branches are affected.
+struct ThrowOnAssign {
+    static int budget;
+    static int live;
+
+    int value;
+
+    explicit ThrowOnAssign(int v = 0) : value(v) { ++live; }
+    ThrowOnAssign(const ThrowOnAssign& o) : value(o.value) { ++live; }
+    ThrowOnAssign& operator=(const ThrowOnAssign& o) {
+        if (budget-- <= 0) throw std::runtime_error("assignment failed");
+        value = o.value;
+        return *this;
+    }
+    ~ThrowOnAssign() { --live; }
+
+    static void reset(int b) { budget = b; live = 0; }
+};
+
+int ThrowOnAssign::budget = 0;
+int ThrowOnAssign::live = 0;
+
+// ---------------------------------------------------------------------------
+// Return value and chaining
+// ---------------------------------------------------------------------------
+
+TEST(CopyAssign, ReturnsReferenceToThis) {
+    vector<int> a(2, 1);
+    vector<int> b(3, 7);
+    vector<int>& r = (a = b);
+    EXPECT_EQ(&r, &a) << "operator= returned a copy instead of *this";
+}
+
+TEST(CopyAssign, SupportsChaining) {
+    vector<int> a(1, 0), b(1, 0), c(3, 5);
+    a = b = c;
+    ASSERT_EQ(a.size(), 3u);
+    ASSERT_EQ(b.size(), 3u);
+    EXPECT_EQ(a[2], 5);
+    EXPECT_EQ(b[2], 5);
+}
+
+// ---------------------------------------------------------------------------
+// Self-assignment
+// ---------------------------------------------------------------------------
+
+TEST(CopyAssign, SelfAssignmentPreservesContents) {
+    // Without the this == &other guard, the reuse branches read and write the
+    // same buffer and the tail gets destroyed after being "copied".
+    vector<int> a(4, 3);
+    a = a;
+    ASSERT_EQ(a.size(), 4u);
+    for (vector<int>::size_type i = 0; i < a.size(); ++i) EXPECT_EQ(a[i], 3);
+}
+
+TEST(CopyAssign, SelfAssignmentDoesNoWork) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(4);
+        Tracked::assignments = 0;
+        Tracked::dtors = 0;
+
+        a = a;
+
+        EXPECT_EQ(Tracked::assignments, 0) << "self-assignment did element work";
+        EXPECT_EQ(Tracked::dtors, 0) << "self-assignment destroyed elements";
+        EXPECT_EQ(Tracked::live, 4);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(CopyAssign, SelfAssignmentThroughAReferenceIsSafe) {
+    // The realistic way self-assignment happens.
+    vector<Owning> a(3, Owning("payload"));
+    const vector<Owning>& alias = a;
+    a = alias;
+    EXPECT_EQ(a.size(), 3u);
+}
+
+// ---------------------------------------------------------------------------
+// Branch A: reallocation (capacity_ < other.size_)
+// ---------------------------------------------------------------------------
+
+TEST(CopyAssign, GrowingBeyondCapacityReallocates) {
+    vector<int> a(2, 1);
+    vector<int> b(10, 4);
+    a = b;
+    ASSERT_EQ(a.size(), 10u);
+    EXPECT_GE(a.capacity(), 10u);
+    EXPECT_EQ(a[0], 4);
+    EXPECT_EQ(a[9], 4);
+}
+
+TEST(CopyAssign, GrowingFromEmpty) {
+    vector<int> a;
+    vector<int> b(3, 6);
+    a = b;
+    ASSERT_EQ(a.size(), 3u);
+    EXPECT_EQ(a[1], 6);
+}
+
+TEST(CopyAssign, ReallocationDestroysTheOldElements) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(2);
+        vector<Tracked> b(10);
+        ASSERT_EQ(Tracked::live, 12);
+
+        a = b;
+        // a's 2 old elements destroyed, 10 new copies built: 10 + 10 = 20 live.
+        EXPECT_EQ(Tracked::live, 20) << "old elements leaked or were double-destroyed";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(CopyAssign, ReallocationUsesCopyConstructionNotAssignment) {
+    // Nothing exists in the fresh buffer, so every element must be constructed.
+    Tracked::reset();
+    {
+        vector<Tracked> a(2);
+        vector<Tracked> b(10);
+        Tracked::copy_ctors = 0;
+        Tracked::assignments = 0;
+
+        a = b;
+
+        EXPECT_EQ(Tracked::copy_ctors, 10);
+        EXPECT_EQ(Tracked::assignments, 0) << "assigned into raw memory";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Branch B: growing within existing capacity
+// ---------------------------------------------------------------------------
+
+TEST(CopyAssign, GrowingWithinCapacityReusesTheBuffer) {
+    // Build spare capacity by assigning a large vector then a smaller one.
+    vector<int> a(10, 1);
+    vector<int> small(2, 2);
+    a = small;
+    ASSERT_EQ(a.size(), 2u);
+    const int* buffer = &a[0];
+
+    vector<int> mid(7, 3);
+    a = mid;  // 7 <= capacity, no reallocation expected
+
+    ASSERT_EQ(a.size(), 7u);
+    EXPECT_EQ(&a[0], buffer) << "reallocated despite sufficient capacity";
+    EXPECT_EQ(a[0], 3);
+    EXPECT_EQ(a[6], 3);
+}
+
+TEST(CopyAssign, GrowingWithinCapacityMixesAssignmentAndConstruction) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(10);
+        vector<Tracked> two(2);
+        a = two;                      // a now size 2, capacity 10
+        ASSERT_EQ(a.size(), 2u);
+
+        vector<Tracked> seven(7);
+        Tracked::assignments = 0;
+        Tracked::copy_ctors = 0;
+
+        a = seven;
+
+        EXPECT_EQ(Tracked::assignments, 2) << "the existing 2 elements should be assigned";
+        EXPECT_EQ(Tracked::copy_ctors, 5) << "the 5 new slots should be constructed";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Branch C: shrinking
+// ---------------------------------------------------------------------------
+
+TEST(CopyAssign, ShrinkingKeepsTheBufferAndCapacity) {
+    vector<int> a(10, 1);
+    const int* buffer = &a[0];
+    const auto cap = a.capacity();
+
+    vector<int> b(3, 8);
+    a = b;
+
+    ASSERT_EQ(a.size(), 3u);
+    EXPECT_EQ(&a[0], buffer) << "shrinking should not reallocate";
+    EXPECT_EQ(a.capacity(), cap) << "shrinking should not reduce capacity";
+    EXPECT_EQ(a[2], 8);
+}
+
+TEST(CopyAssign, ShrinkingDestroysTheTail) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(10);
+        vector<Tracked> b(3);
+        ASSERT_EQ(Tracked::live, 13);
+
+        a = b;
+        // a: 3 assigned-over survivors + 7 destroyed. b: 3. Total 6.
+        EXPECT_EQ(Tracked::live, 6) << "tail elements were leaked or double-destroyed";
+        EXPECT_EQ(a.size(), 3u);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(CopyAssign, ShrinkingReleasesTailResources) {
+    // ASan: the 7 discarded strings must be freed, exactly once.
+    vector<Owning> a(10, Owning("payload"));
+    vector<Owning> b(3, Owning("payload"));
+    a = b;
+    EXPECT_EQ(a.size(), 3u);
+}
+
+TEST(CopyAssign, AssigningEmptyEmptiesTheTarget) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(5);
+        vector<Tracked> empty;
+        a = empty;
+        EXPECT_EQ(a.size(), 0u);
+        EXPECT_EQ(Tracked::live, 0) << "elements were not destroyed";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(CopyAssign, SameSizeAssignsEveryElement) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(4);
+        vector<Tracked> b(4);
+        Tracked::assignments = 0;
+        Tracked::copy_ctors = 0;
+        Tracked::dtors = 0;
+
+        a = b;
+
+        EXPECT_EQ(Tracked::assignments, 4);
+        EXPECT_EQ(Tracked::copy_ctors, 0) << "constructed instead of assigned";
+        EXPECT_EQ(Tracked::dtors, 0) << "destroyed instead of assigned";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Independence and source integrity
+// ---------------------------------------------------------------------------
+
+TEST(CopyAssign, ResultIsIndependentOfTheSource) {
+    vector<int> a(2, 1);
+    vector<int> b(5, 9);
+    a = b;
+    a[0] = 100;
+    EXPECT_EQ(b[0], 9) << "assignment produced a shallow copy";
+    EXPECT_NE(&a[0], &b[0]);
+}
+
+TEST(CopyAssign, SourceIsUnchanged) {
+    vector<int> a(2, 1);
+    vector<int> b(5, 9);
+    a = b;
+    ASSERT_EQ(b.size(), 5u);
+    EXPECT_EQ(b[4], 9);
+}
+
+TEST(CopyAssign, TargetSurvivesTheSourceGoingAway) {
+    vector<int> a(1, 0);
+    {
+        vector<int> b(4, 2);
+        a = b;
+    }
+    ASSERT_EQ(a.size(), 4u);
+    EXPECT_EQ(a[3], 2);
+}
+
+TEST(CopyAssign, RepeatedAssignmentDoesNotLeak) {
+    // ASan: a missing free on the reallocating path shows up here.
+    vector<Owning> a;
+    for (int i = 0; i < 200; ++i) {
+        vector<Owning> b(static_cast<vector<Owning>::size_type>(i % 20 + 1),
+                         Owning("payload"));
+        a = b;
+    }
+    SUCCEED();
+}
+
+TEST(CopyAssign, WorksForTypeWithNoDefaultCtor) {
+    // Assignment must never need T(). Fails to compile if the reallocating
+    // branch default-constructs before assigning.
+    vector<NoDefault> a(2, NoDefault(1));
+    vector<NoDefault> b(5, NoDefault(9));
+    a = b;
+    ASSERT_EQ(a.size(), 5u);
+    EXPECT_EQ(a[4].value, 9);
+}
+
+TEST(CopyAssign, ElementsRemainContiguous) {
+    vector<int> a(2, 1);
+    vector<int> b(6, 3);
+    a = b;
+    EXPECT_EQ(&a[0] + 5, &a[5]);
+}
+
+// ---------------------------------------------------------------------------
+// Exception safety
+// ---------------------------------------------------------------------------
+
+TEST(CopyAssign, ReallocatingBranchGivesTheStrongGuarantee) {
+    // The new buffer is built before the old one is touched, so a throw must
+    // leave the target exactly as it was.
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(1);
+        vector<ThrowOnCopy> a(3, proto);
+        vector<ThrowOnCopy> b(20, proto);
+        const ThrowOnCopy* buffer = &a[0];
+        const int before = ThrowOnCopy::live;
+
+        ThrowOnCopy::budget = 5;  // fails partway through the 20 copies
+        EXPECT_THROW({ a = b; }, std::runtime_error);
+
+        EXPECT_EQ(a.size(), 3u) << "the target was modified by a failed assignment";
+        EXPECT_EQ(&a[0], buffer) << "the target's buffer was released";
+        EXPECT_EQ(ThrowOnCopy::live, before) << "the partial buffer leaked";
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+
+TEST(CopyAssign, ReusingBranchGivesTheBasicGuarantee) {
+    // T::operator= throwing leaves every element valid -- the invariant holds,
+    // only the values are unspecified. The vector must NOT be demolished:
+    // it is a live object whose destructor will run later.
+    ThrowOnAssign::reset(/*budget=*/1000);
+    {
+        vector<ThrowOnAssign> a(6, ThrowOnAssign(1));
+        vector<ThrowOnAssign> b(6, ThrowOnAssign(2));
+
+        ThrowOnAssign::budget = 3;  // fails on the 4th of 6 assignments
+        EXPECT_THROW({ a = b; }, std::runtime_error);
+
+        EXPECT_EQ(a.size(), 6u) << "the vector was gutted by a recoverable failure";
+        EXPECT_EQ(a.capacity(), 6u);
+        EXPECT_NO_THROW({ volatile int x = a[0].value; (void)x; })
+            << "elements are no longer readable";
+    }
+    EXPECT_EQ(ThrowOnAssign::live, 0) << "cleanup on the throwing path was wrong";
+}
+
+TEST(CopyAssign, FailedAssignmentLeavesADestructibleObject) {
+    // The most important property: whatever state the throw leaves behind,
+    // ~vector() must handle it. ASan catches a double free or a dangling free.
+    ThrowOnAssign::reset(/*budget=*/1000);
+    {
+        vector<ThrowOnAssign> a(8, ThrowOnAssign(1));
+        vector<ThrowOnAssign> b(8, ThrowOnAssign(2));
+        ThrowOnAssign::budget = 2;
+        EXPECT_THROW({ a = b; }, std::runtime_error);
+    }
+    EXPECT_EQ(ThrowOnAssign::live, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Contract
+// ---------------------------------------------------------------------------
+ 
+TEST(MoveAssign, IsMarkedNoexcept) {
+    // std::swap derives its own noexcept from this one, which in turn governs
+    // every algorithm that swaps.
+    static_assert(std::is_nothrow_move_assignable<vector<int>>::value,
+                  "move assignment must be noexcept");
+    SUCCEED();
+}
+ 
+TEST(MoveAssign, ReturnsReferenceToThis) {
+    vector<int> a(2, 1);
+    vector<int> b(3, 7);
+    vector<int>& r = (a = std::move(b));
+    EXPECT_EQ(&r, &a);
+}
+ 
+TEST(MoveAssign, SupportsChaining) {
+    vector<int> a(1, 0), b(1, 0), c(3, 5);
+    a = b = std::move(c);
+    ASSERT_EQ(a.size(), 3u);
+    ASSERT_EQ(b.size(), 3u);
+    EXPECT_EQ(a[2], 5);
+}
+ 
+// ---------------------------------------------------------------------------
+// Overload resolution
+// ---------------------------------------------------------------------------
+ 
+TEST(MoveAssign, RvaluesSelectMoveNotCopy) {
+    // An rvalue binds happily to const vector&, so without the && overload
+    // this silently deep-copies and copy_ctors becomes 5.
+    Tracked::reset();
+    {
+        vector<Tracked> a(2);
+        vector<Tracked> b(5);
+        Tracked::copy_ctors = 0;
+ 
+        a = std::move(b);
+ 
+        EXPECT_EQ(Tracked::copy_ctors, 0) << "an rvalue selected copy assignment";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(MoveAssign, LvaluesStillSelectCopy) {
+    // The mirror image: adding the && overload must not divert plain copies.
+    Tracked::reset();
+    {
+        vector<Tracked> a(2);
+        vector<Tracked> b(5);
+        Tracked::copy_ctors = 0;
+ 
+        a = b;
+ 
+        EXPECT_EQ(Tracked::copy_ctors, 5) << "an lvalue was moved from";
+        EXPECT_EQ(b.size(), 5u) << "the source was gutted by a copy";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// The transfer itself
+// ---------------------------------------------------------------------------
+ 
+TEST(MoveAssign, StealsTheBuffer) {
+    // The defining property: same memory, not a reallocation.
+    vector<int> a(2, 1);
+    vector<int> b(6, 9);
+    const int* buffer = &b[0];
+ 
+    a = std::move(b);
+ 
+    ASSERT_EQ(a.size(), 6u);
+    EXPECT_EQ(&a[0], buffer) << "the buffer was copied, not transferred";
+    EXPECT_EQ(a[5], 9);
+}
+ 
+TEST(MoveAssign, TransfersCapacityToo) {
+    vector<int> big(10, 1);
+    vector<int> small(2, 2);
+    big = small;                 // big keeps capacity 10, size 2
+    const auto cap = big.capacity();
+    ASSERT_GE(cap, 10u);
+ 
+    vector<int> dest;
+    dest = std::move(big);
+    EXPECT_EQ(dest.capacity(), cap) << "capacity was not carried over";
+    EXPECT_EQ(dest.size(), 2u);
+}
+ 
+TEST(MoveAssign, LeavesTheSourceEmpty) {
+    vector<int> a(2, 1);
+    vector<int> b(5, 3);
+    a = std::move(b);
+    EXPECT_EQ(b.size(), 0u);
+    EXPECT_EQ(b.capacity(), 0u);
+}
+ 
+TEST(MoveAssign, ConstructsNoElements) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(3);
+        vector<Tracked> b(7);
+        Tracked::copy_ctors = 0;
+        Tracked::default_ctors = 0;
+        Tracked::assignments = 0;
+ 
+        a = std::move(b);
+ 
+        EXPECT_EQ(Tracked::copy_ctors, 0);
+        EXPECT_EQ(Tracked::default_ctors, 0);
+        EXPECT_EQ(Tracked::assignments, 0) << "elements were assigned one by one";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(MoveAssign, ReleasesTheTargetsOldContents) {
+    // The job the move constructor does not have: dispose of what we own first.
+    Tracked::reset();
+    {
+        vector<Tracked> a(3);
+        vector<Tracked> b(7);
+        ASSERT_EQ(Tracked::live, 10);
+ 
+        a = std::move(b);
+ 
+        EXPECT_EQ(Tracked::live, 7) << "the target's 3 old elements leaked";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(MoveAssign, OldTargetResourcesAreFreed) {
+    // ASan: the target's original buffer and its 10 strings must be released.
+    vector<Owning> a(10, Owning("old"));
+    vector<Owning> b(2, Owning("new"));
+    a = std::move(b);
+    EXPECT_EQ(a.size(), 2u);
+}
+ 
+TEST(MoveAssign, ElementsAreDestroyedExactlyOnce) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(3);
+        vector<Tracked> b(7);
+        a = std::move(b);
+    }
+    EXPECT_EQ(Tracked::dtors, 10) << "elements were destroyed twice, or not at all";
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// Self move-assignment
+// ---------------------------------------------------------------------------
+ 
+TEST(MoveAssign, SelfMoveDoesNotDestroyTheVector) {
+    // Without the this == &other guard, destroy_all() runs first and the
+    // vector annihilates itself. It happens for real inside sort/remove.
+    vector<int> a(4, 3);
+    a = std::move(a);
+ 
+    ASSERT_EQ(a.size(), 4u);
+    for (vector<int>::size_type i = 0; i < a.size(); ++i) EXPECT_EQ(a[i], 3);
+}
+ 
+TEST(MoveAssign, SelfMoveThroughAReferenceIsSafe) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(5);
+        vector<Tracked>& alias = a;
+        a = std::move(alias);
+        EXPECT_EQ(Tracked::live, 5) << "self-move destroyed the elements";
+        EXPECT_EQ(a.size(), 5u);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(MoveAssign, SelfMoveLeavesADestructibleObject) {
+    // ASan: a self-move that frees the buffer then keeps the pointer is a
+    // double free at scope exit.
+    {
+        vector<Owning> a(4, Owning("payload"));
+        a = std::move(a);
+    }
+    SUCCEED();
+}
+ 
+// ---------------------------------------------------------------------------
+// Edge cases and lifetimes
+// ---------------------------------------------------------------------------
+ 
+TEST(MoveAssign, MovingIntoAnEmptyVector) {
+    vector<int> a;
+    vector<int> b(4, 2);
+    a = std::move(b);
+    ASSERT_EQ(a.size(), 4u);
+    EXPECT_EQ(a[3], 2);
+    EXPECT_EQ(b.size(), 0u);
+}
+ 
+TEST(MoveAssign, MovingAnEmptyVectorIn) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(5);
+        vector<Tracked> empty;
+        a = std::move(empty);
+        EXPECT_EQ(a.size(), 0u);
+        EXPECT_EQ(Tracked::live, 0) << "the target's elements were not destroyed";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(MoveAssign, MovedFromTargetCanBeAssignedAgain) {
+    // "Valid but unspecified" means still usable, not merely destructible.
+    vector<int> a(3, 1);
+    vector<int> b(4, 2);
+    a = std::move(b);
+ 
+    vector<int> c(2, 5);
+    b = c;
+    ASSERT_EQ(b.size(), 2u);
+    EXPECT_EQ(b[1], 5);
+}
+ 
+TEST(MoveAssign, SourceOutlivingTheTargetIsSafe) {
+    vector<Owning> b(4, Owning("payload"));
+    {
+        vector<Owning> a(2, Owning("old"));
+        a = std::move(b);
+    }
+    EXPECT_EQ(b.size(), 0u);
+}
+ 
+TEST(MoveAssign, ChainedMovesKeepOneOwner) {
+    vector<int> a(3, 4);
+    const int* buffer = &a[0];
+ 
+    vector<int> b, c;
+    b = std::move(a);
+    c = std::move(b);
+ 
+    EXPECT_EQ(&c[0], buffer) << "the buffer was copied somewhere in the chain";
+    EXPECT_EQ(a.size(), 0u);
+    EXPECT_EQ(b.size(), 0u);
+    EXPECT_EQ(c.size(), 3u);
+}
+ 
+TEST(MoveAssign, WorksForElementsThatCannotBeCopied) {
+    // Budget exhausted before the move, so any element copy would throw.
+    ThrowOnCopy::reset(/*budget=*/8);
+    {
+        ThrowOnCopy proto(1);
+        vector<ThrowOnCopy> a(2, proto);
+        vector<ThrowOnCopy> b(6, proto);
+        ASSERT_EQ(ThrowOnCopy::budget, 0);
+ 
+        EXPECT_NO_THROW({ a = std::move(b); });
+        EXPECT_EQ(a.size(), 6u);
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+TEST(MoveAssign, WorksForElementsThatCannotBeAssigned) {
+    // No element assignment happens either -- only three scalars move.
+    ThrowOnAssign::reset(/*budget=*/0);
+    {
+        vector<ThrowOnAssign> a(3, ThrowOnAssign(1));
+        vector<ThrowOnAssign> b(3, ThrowOnAssign(2));
+ 
+        EXPECT_NO_THROW({ a = std::move(b); });
+        EXPECT_EQ(a.size(), 3u);
+    }
+    EXPECT_EQ(ThrowOnAssign::live, 0);
+}
+ 
+TEST(MoveAssign, NestedVectors) {
+    vector<vector<int>> a(1, vector<int>(2, 1));
+    vector<vector<int>> b(2, vector<int>(3, 7));
+    const int* inner = &b[0][0];
+ 
+    a = std::move(b);
+ 
+    ASSERT_EQ(a.size(), 2u);
+    EXPECT_EQ(a[1][2], 7);
+    EXPECT_EQ(&a[0][0], inner) << "the inner buffers were reallocated";
+    EXPECT_EQ(b.size(), 0u);
+}
+ 
+TEST(MoveAssign, RepeatedMovesDoNotLeak) {
+    // ASan: a missing destroy_all() on the target shows up as 200 leaked buffers.
+    vector<Owning> a;
+    for (int i = 0; i < 200; ++i) {
+        vector<Owning> b(static_cast<vector<Owning>::size_type>(i % 20 + 1),
+                         Owning("payload"));
+        a = std::move(b);
+    }
+    SUCCEED();
 }
  
