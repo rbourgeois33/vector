@@ -1,17 +1,22 @@
-// Yet to be understood
+// TO understand:
 // you only need cleanup where a failure would leave the invariant broken; Understand exactly where catch + throw + destroy is needed or not
-// Explicit keyword, and not on copy ctor
-// noexcept keyword on move ctor
 // does throw early returns ?
 // what is allocator
-// understand & fix max_size()  (ptr diff)
-// move_if_noexcept vs move 
 
-// done
+
+
+// DONE:
 // understand if (this == &other) return *this OK
+// Explicit keyword OKAY-ish on count ctor YES so that count is not misunderstood as a value, nowhere else to allow constructors to be used for conversion
+// understand & fix max_size()  (ptr diff) OK: our vector *could* be reprensented in bytes and then we want to be able to substract pointers form each other without overflowing
+// noexcept keyword on move ctor & move_if_noexcept vs move OK-ish still no sure why we dont put it everywhere
+//          noexecpt is a promess to the compiler that the function cant issue exceptions, and changes the behavior of std::move_if_noexcept
+//          move_if_noexcept asks: is T's move constructor noexcept? If yes it moves (fast) if no (and T is copyable) it copies instead. example below
+
 
 //TODO:
-// resize, emplace_back, fix max_size
+// resize
+// emplace_back
 
 
 template<class T> 
@@ -26,10 +31,16 @@ class vector{
 
     //======================== Ctors // Dtors
     //default ctor
-    vector() : data_(nullptr), size_(0), capacity_(0) {}
+    vector() noexcept : data_(nullptr), size_(0), capacity_(0) {}
 
-    //count ctor
-    vector(size_type count) : data_(nullptr), size_(0), capacity_(0){ //not set to count here. State has to be consistent at all time
+    //count ctor. Explicit needed because size_type -> std::vector<size_t> can happen
+    //explicit: no implicit conversion these could happen
+    //void print(const vector<int>& v);
+    //print(42);                 // compiles — builds a 42-element vector
+    //vector<int> v;
+    //v = 5;                     // compiles — temp vector of 5 zeros, then move-assign. 
+    //vector<int> w = 10;        // compiles — looks like "w holds the value 10"
+    explicit vector(size_type count) : data_(nullptr), size_(0), capacity_(0){ //not set to count here. State has to be consistent at all time
         
         T* ptr = allocate_raw(count);
         if (!ptr){
@@ -50,8 +61,8 @@ class vector{
 
     }
 
-    //Fill ctor
-    explicit vector( size_type count, const_reference value) : data_(nullptr), size_(0), capacity_(0){
+    //value ctor
+    vector( size_type count, const_reference value) : data_(nullptr), size_(0), capacity_(0){
 
         T* ptr = allocate_raw(count);
         if (!ptr){
@@ -73,7 +84,10 @@ class vector{
     }
 
     //Copy ctor 
-    vector( const vector& other ): data_(nullptr), size_(0), capacity_(0) { //explicit: no conversion in type deduction
+    //explicit: controls whether a constructor is usable for implicit conversions and copy-initialization. We want that:
+    //vector<int> b = a;              // copy-initialization — dead
+    //vector<int> f() { return v; }   // the return is copy-init too — dead
+    vector( const vector& other ): data_(nullptr), size_(0), capacity_(0) { 
 
         T* ptr = allocate_raw(other.size_);
         if (!ptr){
@@ -93,6 +107,7 @@ class vector{
         }
     }
     
+    //Move constructor
     //takes a r-value reference AKA an object that is ABOUT to be destroyed
     vector( vector&& other ) noexcept : data_(other.data_), size_(other.size_), capacity_(other.capacity_){
 
@@ -243,6 +258,7 @@ class vector{
         return *this; 
     }
 
+    //Move =
     //= with a vector that is about to disappear same as constrcutor but we get rid of our stuff first.
     vector<T>& operator=(vector<T>&& other) noexcept{
         if (this == &other) return *this;
@@ -264,20 +280,21 @@ class vector{
 
     // =============================== capacity 
 
-    bool empty() const{
+    bool empty()  const noexcept {
         return size_==0;
     }
 
-    const size_type size() const { //const -> does not change state
+    const size_type size() const noexcept { //const -> does not change state
         return size_;
     }
 
-    const size_type capacity() const { //const -> does not change state
+    const size_type capacity()  const noexcept { //const -> does not change state
         return capacity_;
     }
 
-    size_type max_size() const {
-        return std::numeric_limits<size_type>::max() / sizeof(T);
+    constexpr size_type max_size()  const noexcept{
+        //max value for signed ptr in bytes so that arithmetic stays within bound, / by sizeof(T)
+        return std::numeric_limits<ptrdiff_t>::max() / sizeof(T);
     }
 
     //only useful if (new_cap>capacity_)
@@ -291,8 +308,8 @@ class vector{
     }
 
     //======================= modifiers
-
-    void clear(){
+    //destuctors are noexcept
+    void clear() noexcept {
         for (size_type j = 0; j < size_; ++j) data_[j].~T();
             size_ = 0;
     }
@@ -342,20 +359,21 @@ class vector{
 
         T* allocate_raw(size_type count){
             if (count==0) return nullptr;
-            if (count >= max_size()) throw std::bad_alloc();
+            if (count > max_size()) throw std::length_error("too large"); //not >
             T* new_ptr = static_cast<T*>(malloc(count*sizeof(T))); //malloc returns void*, need to cast
             if (!new_ptr) throw std::bad_alloc(); //not in a catch block
             return new_ptr;
         }
 
         //Cleanup helper 
+        
         void destroy_all_and_throw(){
             destroy_all();
             throw; // program stop here, dtor never called. Okay because in a catch bloc
         }
 
         //deconstrut until size_
-        void destroy_all() {
+        void destroy_all() noexcept {
             clear();
             if (data_) free(data_);
             data_ = nullptr;
@@ -374,7 +392,7 @@ class vector{
             try {
                 for (;built<size_; built++){ 
                 // new (new_ptr+built) T(data_[built]); //Default initialized mistake because it rebuilds !! same as interview
-                    new (new_ptr + built) T(std::move_if_noexcept(data_[built])); // calls the move constructor, no rebuild (AI this one)
+                    new (new_ptr + built) T(std::move_if_noexcept(data_[built])); // This is ai, explained with example below
             }
             } catch(...){
                 for (size_type j = 0; j < built; ++j) new_ptr[j].~T();
@@ -394,6 +412,7 @@ class vector{
 
 };
 
+//pointer operator
 /*
 #include<iostream>
 int main(){
@@ -415,3 +434,39 @@ int main(){
     return 0;
 }
 */
+
+/* no except stuff 
+int copies = 0;
+
+struct Slow {
+    std::string s;
+    explicit Slow(std::string v) : s(std::move(v)) {}
+    Slow(Slow&& o) : s(std::move(o.s)) {}          // author forgot noexcept
+    Slow(const Slow& o) : s(o.s) { ++copies; }
+};
+
+struct Fast {
+    std::string s;
+    explicit Fast(std::string v) : s(std::move(v)) {}
+    Fast(Fast&& o) noexcept : s(std::move(o.s)) {} // only difference
+    Fast(const Fast& o) : s(o.s) { ++copies; }
+};
+
+int main() {
+    {
+        std::vector<Slow> v;
+        for (int i = 0; i < 1000; ++i)
+            v.push_back(Slow("some string long enough to heap-allocate"));
+        std::printf("Slow: %d copies\n", copies);
+    }
+    copies = 0;
+    {
+        std::vector<Fast> v;
+        for (int i = 0; i < 1000; ++i)
+            v.push_back(Fast("some string long enough to heap-allocate"));
+        std::printf("Fast: %d copies\n", copies);
+    }
+}
+Slow: many copies: move_if_noexcept of reallocate calls copy ctor
+Fast: 0 copies: move_if_noexcept of reallocate move  ctor
+} */
