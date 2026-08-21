@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: plain
+            flags: "-O2"
+          - name: asan-ubsan
+            flags: "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install googletest
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev
+
+      - name: Build
+        run: >
+          g++ -std=c++17 -Wall -Wextra -Wpedantic ${{ matrix.flags }}
+          tests.cpp -lgtest -lgtest_main -pthread -o tests
+
+      - name: Run
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: ./tests
