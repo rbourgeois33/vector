@@ -43,7 +43,7 @@ class vector{
     }
 
     //Fill ctor
-    explicit vector( size_type count, const T& value) : data_(nullptr), size_(0), capacity_(0){
+    explicit vector( size_type count, const_reference value) : data_(nullptr), size_(0), capacity_(0){
 
         T* ptr = allocate_raw(count);
         if (!ptr){
@@ -108,18 +108,70 @@ class vector{
         return capacity_;
     }
 
-    //======================== accessors[]
+    //================ element access
 
-    T& operator[](const size_type i){
+    reference operator[](const size_type i){
         return data_[i];
     }
 
-    const T&  operator[](const size_type i) const {
+    const_reference  operator[](const size_type i) const {
         return data_[i];
     }
+
+    reference at(const size_type i){
+        if (i >= size_) {
+            throw std::out_of_range("Index is out of range");
+        }
+        return data_[i];
+    }
+
+    const_reference at(const size_type i) const {
+        if (i >= size_) {
+            throw std::out_of_range("Index is out of range");
+        }
+        return data_[i];
+    }
+
+    reference front(){
+        if (size_==0) {
+            throw std::out_of_range("vector is not allocated");
+        }
+        return data_[0];
+    }
+
+    const_reference front() const {
+        if (size_==0) {
+            throw std::out_of_range("vector is not allocated");
+        }
+        return data_[0];
+    }
+
+    reference back(){
+        if (size_==0) {
+            throw std::out_of_range("vector is not allocated");
+        }
+        return data_[size_-1];
+    }
+
+    const_reference back() const {
+        if (size_==0) {
+            throw std::out_of_range("vector is not allocated");
+        }
+        return data_[size_-1];
+    }
+
+    const T* data() const {
+        return data_;
+    }
+
+    T* data() {
+        return data_;
+    }
+
+
 
     // ====================== = operator 
-    // vector already has a pricate state
+    // vector already has a private state
     // v=v is legal
     // return a reference
     // reuse your capacity
@@ -203,8 +255,7 @@ class vector{
         return *this; 
     }
 
-    //Get rid of our stuff
-    //Take the source buffer, leave it destructible
+    //= with a vector that is about to disappear same as constrcutor but we get rid of our stuff first.
     vector<T>& operator=(vector<T>&& other) noexcept{
         if (this == &other) return *this;
 
@@ -260,7 +311,7 @@ class vector{
 int main(){
 
     int a =5;
-    int& b=a;
+    inreference b=a;
 
     int*a_ptr = &a; //& on a value -> pointer
 

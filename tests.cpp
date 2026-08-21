@@ -1351,3 +1351,488 @@ TEST(MoveAssign, RepeatedMovesDoNotLeak) {
     SUCCEED();
 }
  
+
+// ---------------------------------------------------------------------------
+// operator[]
+// ---------------------------------------------------------------------------
+ 
+TEST(Subscript, ReadsEveryElement) {
+    vector<int> v(5, 0);
+    for (vector<int>::size_type i = 0; i < v.size(); ++i) v[i] = static_cast<int>(i);
+    for (vector<int>::size_type i = 0; i < v.size(); ++i) EXPECT_EQ(v[i], static_cast<int>(i));
+}
+ 
+TEST(Subscript, ReturnsAReference) {
+    vector<int> v(3, 1);
+    v[1] = 77;
+    EXPECT_EQ(v[1], 77) << "operator[] returned by value, so the write was discarded";
+    static_assert(std::is_same<decltype(std::declval<vector<int>&>()[0]), int&>::value,
+                  "non-const operator[] must return T&");
+}
+ 
+TEST(Subscript, ConstOverloadReturnsAConstReference) {
+    const vector<int> v(3, 5);
+    const int& r = v[0];
+    EXPECT_EQ(r, 5);
+    EXPECT_EQ(&r, &v[0]) << "const operator[] handed back a temporary copy";
+    static_assert(std::is_same<decltype(std::declval<const vector<int>&>()[0]),
+                               const int&>::value,
+                  "const operator[] must return const T&");
+}
+ 
+TEST(Subscript, ElementsAreContiguous) {
+    vector<int> v(4, 0);
+    EXPECT_EQ(&v[0] + 1, &v[1]);
+    EXPECT_EQ(&v[0] + 3, &v[3]);
+}
+ 
+TEST(Subscript, LastValidIndexIsSizeMinusOne) {
+    vector<int> v(3, 0);
+    v[2] = 9;
+    EXPECT_EQ(v[2], 9);
+}
+ 
+// ---------------------------------------------------------------------------
+// at
+// ---------------------------------------------------------------------------
+ 
+TEST(At, ReadsInRangeElements) {
+    vector<int> v(4, 7);
+    EXPECT_EQ(v.at(0), 7);
+    EXPECT_EQ(v.at(3), 7);
+}
+ 
+TEST(At, ReturnsAReference) {
+    vector<int> v(3, 1);
+    v.at(1) = 42;
+    EXPECT_EQ(v[1], 42);
+}
+ 
+TEST(At, ConstOverloadReturnsAConstReference) {
+    const vector<int> v(3, 5);
+    const int& r = v.at(2);
+    EXPECT_EQ(&r, &v[2]);
+}
+ 
+TEST(At, ThrowsOnIndexEqualToSize) {
+    // The boundary case: size_ is one past the last valid index, so this must
+    // throw. A `>` check instead of `>=` lets it through and returns raw memory.
+    vector<int> v(3, 1);
+    EXPECT_THROW({ v.at(3); }, std::out_of_range);
+}
+ 
+TEST(At, ThrowsWellPastTheEnd) {
+    vector<int> v(3, 1);
+    EXPECT_THROW({ v.at(100); }, std::out_of_range);
+}
+ 
+TEST(At, ThrowsOnEmptyVector) {
+    vector<int> v;
+    EXPECT_THROW({ v.at(0); }, std::out_of_range);
+}
+ 
+TEST(At, ConstOverloadThrowsToo) {
+    const vector<int> v(2, 1);
+    EXPECT_THROW({ v.at(2); }, std::out_of_range);
+}
+ 
+TEST(At, NegativeIndexWrapsAndThrows) {
+    // size_type is unsigned, so -1 becomes SIZE_MAX and the bounds check
+    // catches it. No separate lower-bound test is needed.
+    vector<int> v(3, 1);
+    const auto bad = static_cast<vector<int>::size_type>(-1);
+    EXPECT_THROW({ v.at(bad); }, std::out_of_range);
+}
+ 
+TEST(At, DoesNotThrowForEveryValidIndex) {
+    vector<int> v(5, 2);
+    for (vector<int>::size_type i = 0; i < v.size(); ++i)
+        EXPECT_NO_THROW({ v.at(i); }) << "index " << i << " was rejected";
+}
+ 
+// ---------------------------------------------------------------------------
+// front / back
+// ---------------------------------------------------------------------------
+ 
+TEST(FrontBack, ReturnTheFirstAndLastElements) {
+    vector<int> v(4, 0);
+    v[0] = 10;
+    v[3] = 40;
+    EXPECT_EQ(v.front(), 10);
+    EXPECT_EQ(v.back(), 40) << "back() is off by one -- data_[size_] is past the end";
+}
+ 
+TEST(FrontBack, AliasTheRightAddresses) {
+    // The sharpest check: back() must be &v[size-1], not &v[size].
+    vector<int> v(5, 1);
+    EXPECT_EQ(&v.front(), &v[0]);
+    EXPECT_EQ(&v.back(), &v[4]);
+    EXPECT_EQ(&v.back(), &v[0] + v.size() - 1);
+}
+ 
+TEST(FrontBack, AreWritable) {
+    vector<int> v(3, 0);
+    v.front() = 1;
+    v.back() = 3;
+    EXPECT_EQ(v[0], 1);
+    EXPECT_EQ(v[2], 3);
+}
+ 
+TEST(FrontBack, ConstOverloadsReturnConstReferences) {
+    const vector<int> v(3, 8);
+    const int& f = v.front();
+    const int& b = v.back();
+    EXPECT_EQ(&f, &v[0]);
+    EXPECT_EQ(&b, &v[2]);
+}
+ 
+TEST(FrontBack, AreTheSameElementForASingleton) {
+    vector<int> v(1, 5);
+    EXPECT_EQ(&v.front(), &v.back());
+    EXPECT_EQ(v.back(), 5);
+}
+ 
+TEST(FrontBack, BackReadsALiveObject) {
+    // With the off-by-one, back() returns raw memory past the last element.
+    // Reading a Tracked there would touch an object that was never constructed;
+    // comparing values catches it without relying on UB being observable.
+    Tracked::reset();
+    {
+        vector<Tracked> v(3);
+        v[2].value = 99;
+        EXPECT_EQ(v.back().value, 99) << "back() is not the last element";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// data
+// ---------------------------------------------------------------------------
+ 
+TEST(Data, PointsAtTheFirstElement) {
+    vector<int> v(3, 4);
+    EXPECT_EQ(v.data(), &v[0]);
+}
+ 
+TEST(Data, IsUsableAsARawArray) {
+    vector<int> v(4, 0);
+    int* p = v.data();
+    for (int i = 0; i < 4; ++i) p[i] = i * 10;
+    EXPECT_EQ(v[0], 0);
+    EXPECT_EQ(v[3], 30);
+}
+ 
+TEST(Data, ConstOverloadReturnsAConstPointer) {
+    const vector<int> v(3, 6);
+    const int* p = v.data();
+    EXPECT_EQ(p, &v[0]);
+    EXPECT_EQ(p[2], 6);
+    static_assert(std::is_same<decltype(std::declval<const vector<int>&>().data()),
+                               const int*>::value,
+                  "const data() must return const T*");
+}
+ 
+TEST(Data, IsNullForADefaultConstructedVector) {
+    vector<int> v;
+    EXPECT_EQ(v.data(), nullptr);
+}
+ 
+TEST(Data, SurvivesACopy) {
+    vector<int> a(3, 1);
+    vector<int> b(a);
+    EXPECT_NE(a.data(), b.data()) << "the copy shares the source's buffer";
+}
+ 
+TEST(Data, FollowsTheBufferThroughAMove) {
+    vector<int> a(3, 1);
+    const int* buffer = a.data();
+    vector<int> b(std::move(a));
+    EXPECT_EQ(b.data(), buffer);
+    EXPECT_EQ(a.data(), nullptr) << "the moved-from vector still points at the buffer";
+}
+ 
+// ---------------------------------------------------------------------------
+// Consistency across accessors
+// ---------------------------------------------------------------------------
+ 
+TEST(ElementAccess, AllAccessorsAgree) {
+    vector<int> v(5, 0);
+    for (vector<int>::size_type i = 0; i < v.size(); ++i) v[i] = static_cast<int>(i) + 1;
+ 
+    EXPECT_EQ(&v.at(0), &v[0]);
+    EXPECT_EQ(&v.at(4), &v[4]);
+    EXPECT_EQ(&v.front(), v.data());
+    EXPECT_EQ(&v.back(), v.data() + v.size() - 1);
+}
+ 
+TEST(ElementAccess, WorkOnAConstVector) {
+    // Fails to compile if any const overload is missing.
+    const vector<int> v(3, 2);
+    EXPECT_EQ(v[0], 2);
+    EXPECT_EQ(v.at(1), 2);
+    EXPECT_EQ(v.front(), 2);
+    EXPECT_EQ(v.back(), 2);
+    EXPECT_EQ(v.data()[2], 2);
+}
+ 
+
+
+// ---------------------------------------------------------------------------
+// Every route into the state produces the same state
+// ---------------------------------------------------------------------------
+ 
+TEST(Unallocated, DefaultConstructed) {
+    vector<int> v;
+    EXPECT_EQ(v.size(), 0u);
+    EXPECT_EQ(v.capacity(), 0u);
+    EXPECT_EQ(v.data(), nullptr);
+}
+ 
+TEST(Unallocated, CountZero) {
+    vector<int> v(0);
+    EXPECT_EQ(v.size(), 0u);
+    EXPECT_EQ(v.capacity(), 0u) << "capacity_ was set before the allocation was skipped";
+    EXPECT_EQ(v.data(), nullptr) << "allocate_raw(0) must not allocate";
+}
+ 
+TEST(Unallocated, FillWithCountZero) {
+    vector<int> v(0, 42);
+    EXPECT_EQ(v.size(), 0u);
+    EXPECT_EQ(v.capacity(), 0u);
+    EXPECT_EQ(v.data(), nullptr);
+}
+ 
+TEST(Unallocated, MovedFrom) {
+    vector<int> a(4, 1);
+    vector<int> b(std::move(a));
+    EXPECT_EQ(a.size(), 0u);
+    EXPECT_EQ(a.capacity(), 0u);
+    EXPECT_EQ(a.data(), nullptr) << "the moved-from vector still points at the buffer";
+}
+ 
+TEST(Unallocated, MoveAssignedFrom) {
+    vector<int> a(4, 1);
+    vector<int> b;
+    b = std::move(a);
+    EXPECT_EQ(a.size(), 0u);
+    EXPECT_EQ(a.capacity(), 0u);
+    EXPECT_EQ(a.data(), nullptr);
+}
+ 
+TEST(Unallocated, AssignedAnEmptyVectorKeepsItsBuffer) {
+    // The one case that does NOT become unallocated: assignment reuses the
+    // buffer, so size_ drops to 0 but capacity_ and data_ survive.
+    vector<int> a(5, 1);
+    vector<int> empty;
+    a = empty;
+    EXPECT_EQ(a.size(), 0u);
+    EXPECT_GE(a.capacity(), 5u) << "assignment should not release capacity";
+    EXPECT_NE(a.data(), nullptr);
+}
+ 
+// ---------------------------------------------------------------------------
+// Destruction
+// ---------------------------------------------------------------------------
+ 
+TEST(Unallocated, DestroyingIsSafe) {
+    // free(nullptr) is a defined no-op and the destroy loop runs zero times.
+    { vector<int> v; }
+    { vector<int> v(0); }
+    { vector<Owning> v; }
+    SUCCEED();
+}
+ 
+TEST(Unallocated, DestroyingAMovedFromVectorIsSafe) {
+    // ASan: if data_ was not nulled, this is a double free.
+    {
+        vector<Owning> a(4, Owning("payload"));
+        vector<Owning> b(std::move(a));
+    }
+    SUCCEED();
+}
+ 
+// ---------------------------------------------------------------------------
+// Copying and moving out of the state
+// ---------------------------------------------------------------------------
+ 
+TEST(Unallocated, CanBeCopyConstructedFrom) {
+    vector<int> a;
+    vector<int> b(a);
+    EXPECT_EQ(b.size(), 0u);
+    EXPECT_EQ(b.capacity(), 0u);
+    EXPECT_EQ(b.data(), nullptr);
+}
+ 
+TEST(Unallocated, CanBeMoveConstructedFrom) {
+    vector<int> a;
+    vector<int> b(std::move(a));
+    EXPECT_EQ(b.size(), 0u);
+    EXPECT_EQ(b.data(), nullptr);
+    EXPECT_EQ(a.size(), 0u);
+}
+ 
+TEST(Unallocated, CopyingAMovedFromVectorIsSafe) {
+    vector<int> a(3, 1);
+    vector<int> b(std::move(a));
+    vector<int> c(a);  // copy of the hollowed-out source
+    EXPECT_EQ(c.size(), 0u);
+    EXPECT_EQ(c.data(), nullptr);
+}
+ 
+TEST(Unallocated, CopyConstructingFromEmptyDoesNoElementWork) {
+    Tracked::reset();
+    {
+        vector<Tracked> a;
+        vector<Tracked> b(a);
+        EXPECT_EQ(Tracked::copy_ctors, 0);
+        EXPECT_EQ(Tracked::live, 0);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// Assignment into and out of the state
+// ---------------------------------------------------------------------------
+ 
+TEST(Unallocated, CanBeCopyAssignedInto) {
+    // The reallocating branch starting from capacity_ == 0.
+    vector<int> a;
+    vector<int> b(3, 7);
+    a = b;
+    ASSERT_EQ(a.size(), 3u);
+    EXPECT_EQ(a[2], 7);
+    EXPECT_NE(a.data(), nullptr);
+}
+ 
+TEST(Unallocated, CanBeMoveAssignedInto) {
+    vector<int> a;
+    vector<int> b(3, 7);
+    a = std::move(b);
+    ASSERT_EQ(a.size(), 3u);
+    EXPECT_EQ(a[2], 7);
+    EXPECT_EQ(b.size(), 0u);
+}
+ 
+TEST(Unallocated, CanBeCopyAssignedFrom) {
+    // Shrink-to-nothing: destroys the target's elements, keeps its buffer.
+    Tracked::reset();
+    {
+        vector<Tracked> a(5);
+        vector<Tracked> empty;
+        a = empty;
+        EXPECT_EQ(a.size(), 0u);
+        EXPECT_EQ(Tracked::live, 0) << "the target's elements were not destroyed";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(Unallocated, CanBeMoveAssignedFrom) {
+    Tracked::reset();
+    {
+        vector<Tracked> a(5);
+        vector<Tracked> empty;
+        a = std::move(empty);
+        EXPECT_EQ(a.size(), 0u);
+        EXPECT_EQ(a.data(), nullptr) << "the target kept a buffer it no longer owns";
+        EXPECT_EQ(Tracked::live, 0);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(Unallocated, EmptyToEmptyAssignment) {
+    vector<int> a, b;
+    a = b;
+    EXPECT_EQ(a.size(), 0u);
+    a = std::move(b);
+    EXPECT_EQ(a.size(), 0u);
+}
+ 
+TEST(Unallocated, SelfAssignmentIsSafe) {
+    vector<int> a;
+    a = a;
+    EXPECT_EQ(a.size(), 0u);
+    EXPECT_EQ(a.data(), nullptr);
+}
+ 
+TEST(Unallocated, SelfMoveAssignmentIsSafe) {
+    vector<int> a;
+    a = std::move(a);
+    EXPECT_EQ(a.size(), 0u);
+    EXPECT_EQ(a.data(), nullptr);
+}
+ 
+TEST(Unallocated, MovedFromVectorCanBeReused) {
+    // "Valid but unspecified" means usable, not merely destructible.
+    vector<int> a(3, 1);
+    vector<int> b(std::move(a));
+ 
+    vector<int> c(2, 5);
+    a = c;
+    ASSERT_EQ(a.size(), 2u);
+    EXPECT_EQ(a[1], 5);
+}
+ 
+// ---------------------------------------------------------------------------
+// Accessors on the empty state
+// ---------------------------------------------------------------------------
+ 
+TEST(Unallocated, AtAlwaysThrows) {
+    vector<int> v;
+    EXPECT_THROW({ v.at(0); }, std::out_of_range);
+    EXPECT_THROW({ v.at(1); }, std::out_of_range);
+}
+ 
+TEST(Unallocated, ConstAtAlsoThrows) {
+    const vector<int> v;
+    EXPECT_THROW({ v.at(0); }, std::out_of_range);
+}
+ 
+TEST(Unallocated, SizeAndCapacityWorkOnConst) {
+    const vector<int> v;
+    EXPECT_EQ(v.size(), 0u);
+    EXPECT_EQ(v.capacity(), 0u);
+    EXPECT_EQ(v.data(), nullptr);
+}
+ 
+TEST(Unallocated, IterationRangeIsEmpty) {
+    // The common loop shape must terminate immediately without dereferencing.
+    vector<int> v;
+    int count = 0;
+    for (vector<int>::size_type i = 0; i < v.size(); ++i) ++count;
+    EXPECT_EQ(count, 0);
+ 
+    // Pointer arithmetic on a null data() with a zero count: begin == end.
+    EXPECT_EQ(v.data(), v.data() + v.size());
+}
+ 
+// ---------------------------------------------------------------------------
+// Failed construction
+// ---------------------------------------------------------------------------
+ 
+TEST(Unallocated, ThrowingConstructionLeavesNoObject) {
+    // A constructor that throws never produces an object, so there is nothing
+    // to inspect afterwards -- only the absence of a leak. ASan checks that.
+    ThrowOnCopy::reset(/*budget=*/2);
+    ThrowOnCopy proto(1);
+    EXPECT_THROW({ vector<ThrowOnCopy> v(10, proto); }, std::runtime_error);
+    EXPECT_EQ(ThrowOnCopy::live, 1) << "cleanup on the throwing path was wrong";
+}
+ 
+TEST(Unallocated, StaysUsableAfterAFailedAssignment) {
+    // Unlike a constructor, a failed assignment leaves a live object. An empty
+    // target must still be empty and usable afterwards.
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(1);
+        vector<ThrowOnCopy> a;
+        vector<ThrowOnCopy> b(10, proto);
+ 
+        ThrowOnCopy::budget = 3;
+        EXPECT_THROW({ a = b; }, std::runtime_error);
+ 
+        EXPECT_EQ(a.size(), 0u) << "the empty target was corrupted";
+        EXPECT_EQ(a.data(), nullptr);
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
