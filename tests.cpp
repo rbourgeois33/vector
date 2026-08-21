@@ -1,4 +1,3 @@
-///Mostly AI generated, for the sake of learning
 #include <gtest/gtest.h>
 
 #include <cstdint>

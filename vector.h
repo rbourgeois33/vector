@@ -1,13 +1,16 @@
-//My vector, guided by AI but not written by AI
-
 // Yet to be understood
-// you only need cleanup where a failure would leave the invariant broken / understand exactly where catch + throw + destroy is needed or not
-//Explicit keyword, and not on copy ctor
-//noexcept keyword on move ctor
-//understand         if (this == &other) return *this OK
-//  does throw early returns ?
+// you only need cleanup where a failure would leave the invariant broken; Understand exactly where catch + throw + destroy is needed or not
+// Explicit keyword, and not on copy ctor
+// noexcept keyword on move ctor
+// does throw early returns ?
+// what is allocator
+// understand & fix max_size()  (ptr diff)
 
-template<class T, class Allocator = std::allocator<T> /*#?#*/> 
+// done
+// understand if (this == &other) return *this OK
+
+
+template<class T> 
 class vector{
 
     public:
@@ -269,7 +272,6 @@ class vector{
         return capacity_;
     }
 
-    //TODO unsure (AI) fix
     size_type max_size() const {
         return std::numeric_limits<size_type>::max() / sizeof(T);
     }
