@@ -5,9 +5,13 @@
 // does throw early returns ?
 // what is allocator
 // understand & fix max_size()  (ptr diff)
+// move_if_noexcept vs move 
 
 // done
 // understand if (this == &other) return *this OK
+
+//TODO:
+// resize, emplace_back, fix max_size
 
 
 template<class T> 
@@ -286,6 +290,51 @@ class vector{
         if (capacity_ > size_) reallocate(size_);
     }
 
+    //======================= modifiers
+
+    void clear(){
+        for (size_type j = 0; j < size_; ++j) data_[j].~T();
+            size_ = 0;
+    }
+
+
+    //TODO can be improved Or construct into the new buffer before freeing the old one
+    void push_back( const T& value ){
+        //danger: if value is from this, its garbage after reallocation
+
+        if (size_==capacity_){
+            T tmp = value; // value may alias into data_; copy it out before reserve() frees the buffer
+            reserve(capacity_==0 ? 1:capacity_*2); // as discussed in itw
+            new (data_+size_) T(tmp);
+            size_+=1;
+            return;
+        }
+
+        new (data_+size_) T(value); //We construct a new element with copy ctor
+        size_+=1;
+    }
+
+       void push_back(T&& value ){
+        //danger: if value is from this, its garbage after reallocation
+        if (size_==capacity_){
+            auto tmp = std::move(value); // value may alias into data_; copy it out before reserve() frees the buffer
+            reserve(capacity_==0 ? 1:capacity_*2); // as discussed in itw
+            new (data_+size_) T(std::move(tmp)); // 2 moves 
+            size_+=1;
+            return;
+        }
+
+        new (data_+size_) T(std::move(value)); //We construct a new element with move ctor
+        size_+=1;
+    }
+
+
+
+
+
+
+    // ============ private
+
     private:
         T* data_{nullptr};
         size_type capacity_{0u};
@@ -307,10 +356,9 @@ class vector{
 
         //deconstrut until size_
         void destroy_all() {
-            for (size_type j = 0; j < size_; ++j) data_[j].~T();
+            clear();
             if (data_) free(data_);
             data_ = nullptr;
-            size_ = 0;
             capacity_ = 0;
         }
 

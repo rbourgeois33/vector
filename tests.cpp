@@ -2486,3 +2486,378 @@ TEST(ShrinkToFit, MovedFromVectorIsAlreadyFit) {
     EXPECT_EQ(b.size(), 3u);
 }
  
+
+// ---------------------------------------------------------------------------
+// Basic behaviour
+// ---------------------------------------------------------------------------
+ 
+TEST(PushBack, AppendsToAnEmptyVector) {
+    vector<int> v;
+    v.push_back(7);
+    ASSERT_EQ(v.size(), 1u);
+    EXPECT_EQ(v[0], 7);
+    EXPECT_GE(v.capacity(), 1u);
+}
+ 
+TEST(PushBack, AppendsInOrder) {
+    vector<int> v;
+    for (int i = 0; i < 10; ++i) v.push_back(i);
+ 
+    ASSERT_EQ(v.size(), 10u);
+    for (int i = 0; i < 10; ++i) EXPECT_EQ(v[i], i) << "element " << i << " is wrong";
+}
+ 
+TEST(PushBack, UpdatesBackAndFront) {
+    vector<int> v;
+    v.push_back(1);
+    EXPECT_EQ(v.front(), 1);
+    EXPECT_EQ(v.back(), 1);
+ 
+    v.push_back(2);
+    EXPECT_EQ(v.front(), 1);
+    EXPECT_EQ(v.back(), 2) << "back() did not follow the new element";
+}
+ 
+TEST(PushBack, AppendsToAVectorBuiltByOtherMeans) {
+    vector<int> v(3, 5);
+    v.push_back(9);
+    ASSERT_EQ(v.size(), 4u);
+    EXPECT_EQ(v[2], 5);
+    EXPECT_EQ(v[3], 9);
+}
+ 
+TEST(PushBack, ElementsRemainContiguous) {
+    vector<int> v;
+    for (int i = 0; i < 20; ++i) v.push_back(i);
+    EXPECT_EQ(&v[0] + 19, &v[19]);
+    EXPECT_EQ(v.data(), &v[0]);
+}
+ 
+TEST(PushBack, ConstructsRatherThanAssigns) {
+    // The slot is raw memory, so it must be placement-new'd, never assigned.
+    Tracked::reset();
+    {
+        vector<Tracked> v;
+        v.push_back(Tracked(1));
+        EXPECT_EQ(Tracked::assignments, 0) << "assigned into raw memory";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// Growth
+// ---------------------------------------------------------------------------
+ 
+TEST(PushBack, GrowsCapacityWhenFull) {
+    vector<int> v;
+    v.push_back(1);
+    const auto cap1 = v.capacity();
+    ASSERT_GE(cap1, 1u);
+ 
+    while (v.size() < cap1) v.push_back(0);
+    ASSERT_EQ(v.size(), v.capacity());
+ 
+    v.push_back(99);
+    EXPECT_GT(v.capacity(), cap1) << "capacity did not grow when full";
+    EXPECT_EQ(v.back(), 99);
+}
+ 
+TEST(PushBack, DoesNotReallocateWhileCapacityRemains) {
+    vector<int> v;
+    v.reserve(100);
+    const int* buffer = v.data();
+ 
+    for (int i = 0; i < 100; ++i) v.push_back(i);
+ 
+    EXPECT_EQ(v.data(), buffer) << "reallocated despite sufficient reserved capacity";
+    EXPECT_EQ(v.size(), 100u);
+}
+ 
+TEST(PushBack, GrowthIsGeometricNotLinear) {
+    // Counting reallocations: doubling gives O(log n) of them, growth-by-one
+    // gives n. Detected by watching the buffer address change.
+    vector<int> v;
+    const int* last = nullptr;
+    int reallocations = 0;
+ 
+    for (int i = 0; i < 1000; ++i) {
+        v.push_back(i);
+        if (v.data() != last) { ++reallocations; last = v.data(); }
+    }
+ 
+    EXPECT_LT(reallocations, 30) << "capacity is not growing geometrically";
+    EXPECT_EQ(v.size(), 1000u);
+}
+ 
+TEST(PushBack, GrowsFromCapacityNotSize) {
+    // After a large reserve, size is small but capacity is not. Growth must be
+    // driven by capacity, and must not trigger at all here.
+    vector<int> v(3, 1);
+    v.reserve(500);
+    const int* buffer = v.data();
+ 
+    v.push_back(4);
+ 
+    EXPECT_EQ(v.data(), buffer) << "grew even though capacity was available";
+    EXPECT_EQ(v.capacity(), 500u);
+    EXPECT_EQ(v.size(), 4u);
+}
+ 
+TEST(PushBack, PreservesExistingElementsAcrossGrowth) {
+    vector<int> v;
+    for (int i = 0; i < 500; ++i) v.push_back(i);
+ 
+    ASSERT_EQ(v.size(), 500u);
+    EXPECT_EQ(v[0], 0) << "the first element was lost during a reallocation";
+    EXPECT_EQ(v[250], 250);
+    EXPECT_EQ(v[499], 499);
+}
+ 
+TEST(PushBack, MovesExistingElementsWhenGrowing) {
+    // reserve uses move_if_noexcept, so a noexcept-movable element type must
+    // be moved rather than copied during growth.
+    Movable::reset();
+    {
+        vector<Movable> v;
+        v.reserve(4);
+        for (int i = 0; i < 4; ++i) v.push_back(Movable(i));
+ 
+        Movable::copies = 0;
+        Movable::moves = 0;
+ 
+        v.push_back(Movable(99));  // forces growth: 4 existing elements transfer
+ 
+        EXPECT_EQ(Movable::copies, 0) << "existing elements were copied during growth";
+        EXPECT_GE(Movable::moves, 4);
+    }
+    EXPECT_EQ(Movable::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// Copy overload vs move overload
+// ---------------------------------------------------------------------------
+ 
+TEST(PushBack, LvalueSelectsTheCopyOverload) {
+    Movable::reset();
+    {
+        vector<Movable> v;
+        v.reserve(4);
+        Movable m(5);
+        Movable::copies = 0;
+        Movable::moves = 0;
+ 
+        v.push_back(m);
+ 
+        EXPECT_EQ(Movable::copies, 1) << "an lvalue was moved from";
+        EXPECT_EQ(Movable::moves, 0);
+        EXPECT_EQ(m.value, 5) << "the source was gutted by a copy push_back";
+    }
+    EXPECT_EQ(Movable::live, 0);
+}
+ 
+TEST(PushBack, RvalueSelectsTheMoveOverload) {
+    Movable::reset();
+    {
+        vector<Movable> v;
+        v.reserve(4);
+        Movable m(5);
+        Movable::copies = 0;
+        Movable::moves = 0;
+ 
+        v.push_back(std::move(m));
+ 
+        EXPECT_EQ(Movable::moves, 1) << "an rvalue selected the copy overload";
+        EXPECT_EQ(Movable::copies, 0);
+    }
+    EXPECT_EQ(Movable::live, 0);
+}
+ 
+TEST(PushBack, RvalueMovesEvenWhenTheMoveMayThrow) {
+    // move_if_noexcept belongs in reallocate, not here: there is nothing to
+    // roll back, and the caller already gave up ownership. Using it would
+    // silently copy every type whose move is not noexcept.
+    ThrowingMove::reset();
+    {
+        vector<ThrowingMove> v;
+        v.reserve(4);
+        ThrowingMove t(5);
+        ThrowingMove::copies = 0;
+        ThrowingMove::moves = 0;
+ 
+        v.push_back(std::move(t));
+ 
+        EXPECT_EQ(ThrowingMove::moves, 1)
+            << "push_back copied an rvalue because its move is not noexcept";
+        EXPECT_EQ(ThrowingMove::copies, 0);
+    }
+    EXPECT_EQ(ThrowingMove::live, 0);
+}
+ 
+TEST(PushBack, MoveOverloadTakesOwnership) {
+    vector<std::string> v;
+    std::string s = "a reasonably long string that will not fit in SSO storage";
+    const char* buffer = s.data();
+ 
+    v.push_back(std::move(s));
+ 
+    ASSERT_EQ(v.size(), 1u);
+    EXPECT_EQ(v[0].data(), buffer) << "the string was copied rather than moved";
+}
+ 
+TEST(PushBack, TemporariesUseTheMoveOverload) {
+    Movable::reset();
+    {
+        vector<Movable> v;
+        v.reserve(4);
+        Movable::copies = 0;
+        Movable::moves = 0;
+ 
+        v.push_back(Movable(7));
+ 
+        EXPECT_EQ(Movable::copies, 0) << "a temporary was copied";
+    }
+    EXPECT_EQ(Movable::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// Lifetime and cleanup
+// ---------------------------------------------------------------------------
+ 
+TEST(PushBack, EveryElementIsDestroyedExactlyOnce) {
+    Tracked::reset();
+    {
+        vector<Tracked> v;
+        for (int i = 0; i < 50; ++i) v.push_back(Tracked(i));
+        EXPECT_EQ(Tracked::live, 50);
+    }
+    EXPECT_EQ(Tracked::live, 0) << "elements were leaked or destroyed twice";
+}
+ 
+TEST(PushBack, ReleasesResourcesAcrossManyReallocations) {
+    // ASan: every intermediate buffer must be freed, and every string with it.
+    vector<Owning> v;
+    for (int i = 0; i < 200; ++i) v.push_back(Owning("payload"));
+    EXPECT_EQ(v.size(), 200u);
+}
+ 
+TEST(PushBack, AfterClearReusesTheBuffer) {
+    vector<int> v;
+    v.reserve(100);
+    for (int i = 0; i < 100; ++i) v.push_back(i);
+    const int* buffer = v.data();
+ 
+    v.clear();
+    for (int i = 0; i < 100; ++i) v.push_back(i * 2);
+ 
+    EXPECT_EQ(v.data(), buffer) << "reallocated despite the cleared buffer being big enough";
+    EXPECT_EQ(v[99], 198);
+}
+ 
+TEST(PushBack, WorksOnAMovedFromVector) {
+    vector<int> a(3, 1);
+    vector<int> b(std::move(a));
+ 
+    a.push_back(42);
+ 
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0], 42);
+}
+ 
+// ---------------------------------------------------------------------------
+// Aliasing
+// ---------------------------------------------------------------------------
+ 
+TEST(PushBack, SelfReferencingPushSurvivesReallocation) {
+    // v.push_back(v[0]) when full: the growth frees the old buffer, and `value`
+    // is a reference INTO that buffer. A naive implementation reads freed
+    // memory here. ASan reports use-after-free; the value check catches it
+    // even without sanitizers.
+    vector<int> v;
+    v.reserve(4);
+    for (int i = 1; i <= 4; ++i) v.push_back(i);
+    ASSERT_EQ(v.size(), v.capacity());
+ 
+    v.push_back(v[0]);
+ 
+    ASSERT_EQ(v.size(), 5u);
+    EXPECT_EQ(v.back(), 1) << "push_back read from the buffer it had already freed";
+}
+ 
+TEST(PushBack, SelfReferencingMovePushSurvivesReallocation) {
+    vector<std::string> v;
+    v.reserve(2);
+    v.push_back("first");
+    v.push_back("second");
+    ASSERT_EQ(v.size(), v.capacity());
+ 
+    v.push_back(std::move(v[0]));
+ 
+    ASSERT_EQ(v.size(), 3u);
+    EXPECT_EQ(v[2], "first") << "the moved-from source lived in the freed buffer";
+}
+ 
+// ---------------------------------------------------------------------------
+// Exception safety
+// ---------------------------------------------------------------------------
+ 
+TEST(PushBack, ThrowingElementCopyLeavesTheVectorUnchanged) {
+    // size_ is incremented last, so a throwing construction must leave the
+    // vector exactly as it was.
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(1);
+        vector<ThrowOnCopy> v;
+        v.reserve(10);
+        for (int i = 0; i < 3; ++i) v.push_back(proto);
+        ASSERT_EQ(v.size(), 3u);
+ 
+        ThrowOnCopy::budget = 0;
+        EXPECT_THROW({ v.push_back(proto); }, std::runtime_error);
+ 
+        EXPECT_EQ(v.size(), 3u) << "size counted an element that was never constructed";
+        EXPECT_EQ(v.back().value, 1) << "the existing elements were damaged";
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+TEST(PushBack, ThrowingGrowthLeavesTheVectorUnchanged) {
+    // The throw happens inside reserve, during the transfer of existing
+    // elements. reserve is strong, so nothing should change.
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(7);
+        vector<ThrowOnCopy> v;
+        v.reserve(4);
+        for (int i = 0; i < 4; ++i) v.push_back(proto);
+        const ThrowOnCopy* buffer = v.data();
+        const auto cap = v.capacity();
+ 
+        ThrowOnCopy::budget = 2;  // fails partway through transferring the 4
+        EXPECT_THROW({ v.push_back(proto); }, std::runtime_error);
+ 
+        EXPECT_EQ(v.size(), 4u);
+        EXPECT_EQ(v.capacity(), cap);
+        EXPECT_EQ(v.data(), buffer) << "the original buffer was released";
+        EXPECT_EQ(v[3].value, 7);
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+TEST(PushBack, VectorStillUsableAfterAFailedPush) {
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(3);
+        vector<ThrowOnCopy> v;
+        v.reserve(10);
+        v.push_back(proto);
+ 
+        ThrowOnCopy::budget = 0;
+        EXPECT_THROW({ v.push_back(proto); }, std::runtime_error);
+ 
+        ThrowOnCopy::budget = 5;
+        EXPECT_NO_THROW({ v.push_back(proto); });
+        EXPECT_EQ(v.size(), 2u);
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
