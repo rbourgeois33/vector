@@ -1,10 +1,11 @@
-//My vector, no AI
+//My vector, no AI except if said so
 
 // Yet to be understood
-// you only need cleanup where a failure would leave the invariant broken OK
+// you only need cleanup where a failure would leave the invariant broken 
 //Explicit keyword, and not on copy ctor
 //noexcept keyword on move ctor
 //understand         if (this == &other) return *this OK
+//  does throw early returns ?
 
 template<class T, class Allocator = std::allocator<T> /*#?#*/> 
 class vector{
@@ -100,14 +101,6 @@ class vector{
         destroy_all();
     }
 
-    const size_type size() const { //const -> does not change state
-        return size_;
-    }
-
-     const size_type capacity() const { //const -> does not change state
-        return capacity_;
-    }
-
     //================ element access
 
     reference operator[](const size_type i){
@@ -133,28 +126,28 @@ class vector{
     }
 
     reference front(){
-        if (size_==0) {
+        if (empty()) {
             throw std::out_of_range("vector is not allocated");
         }
         return data_[0];
     }
 
     const_reference front() const {
-        if (size_==0) {
+        if (empty()) {
             throw std::out_of_range("vector is not allocated");
         }
         return data_[0];
     }
 
     reference back(){
-        if (size_==0) {
+        if (empty()) {
             throw std::out_of_range("vector is not allocated");
         }
         return data_[size_-1];
     }
 
     const_reference back() const {
-        if (size_==0) {
+        if (empty()) {
             throw std::out_of_range("vector is not allocated");
         }
         return data_[size_-1];
@@ -188,10 +181,10 @@ class vector{
             //build new
             T* new_ptr = allocate_raw(other.size_);
             
-            size_type built; 
+            size_type built=0; 
             //Could fail : = operator
             try {
-                for (built=0;built<other.size_; built++){ 
+                for (;built<other.size_; built++){ 
                     new (new_ptr+built) T(other[built]); //Default initialized
                 }
             } catch(...){
@@ -274,6 +267,35 @@ class vector{
         return *this;
     }
 
+    // =============================== capacity 
+
+    bool empty() const{
+        return size_==0;
+    }
+
+    const size_type size() const { //const -> does not change state
+        return size_;
+    }
+
+    const size_type capacity() const { //const -> does not change state
+        return capacity_;
+    }
+
+    //TODO unsure (AI) fix
+    size_type max_size() const {
+        return std::numeric_limits<size_type>::max() / sizeof(T);
+    }
+
+    //only useful if (new_cap>capacity_)
+    void reserve(size_type new_cap){
+        if (new_cap>capacity_) reallocate(new_cap);
+    }
+
+    //causes reallocation !! only useful if (capacity_ > size_) 
+    void shrink_to_fit(){
+        if (capacity_ > size_) reallocate(size_);
+    }
+
     private:
         T* data_{nullptr};
         size_type capacity_{0u};
@@ -281,7 +303,7 @@ class vector{
 
         T* allocate_raw(size_type count){
             if (count==0) return nullptr;
-            
+            if (count >= max_size()) throw std::bad_alloc();
             T* new_ptr = static_cast<T*>(malloc(count*sizeof(T))); //malloc returns void*, need to cast
             if (!new_ptr) throw std::bad_alloc(); //not in a catch block
             return new_ptr;
@@ -302,7 +324,35 @@ class vector{
             capacity_ = 0;
         }
 
+        void reallocate(size_type new_cap){
+            //Build new THEN destroy THEN metadata
 
+            assert(new_cap>=size_);
+            T* new_ptr = allocate_raw(new_cap);
+                
+            size_type built=0; 
+            //Could fail : = operator
+            //choice: new items that are > size but < capacity are no even initialized ?
+            try {
+                for (;built<size_; built++){ 
+                // new (new_ptr+built) T(data_[built]); //Default initialized mistake because it rebuilds !! same as intervie
+                    new (new_ptr + built) T(std::move_if_noexcept(data_[built])); // calls the move constructor, no rebuild
+            }
+            } catch(...){
+                for (size_type j = 0; j < built; ++j) new_ptr[j].~T();
+                free(new_ptr);
+                throw;                        // *this is completely untouched
+            }
+
+            //2 
+            size_type old_size = size_;
+            destroy_all(); // killing size is too mich here, we save it before hands
+            size_ = old_size;
+
+            //3
+            data_=new_ptr; 
+            capacity_ = new_cap;
+        }
 
 };
 

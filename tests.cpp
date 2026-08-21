@@ -1836,3 +1836,654 @@ TEST(Unallocated, StaysUsableAfterAFailedAssignment) {
     EXPECT_EQ(ThrowOnCopy::live, 0);
 }
  
+
+// ---------------------------------------------------------------------------
+// Element types that report move vs copy
+// ---------------------------------------------------------------------------
+ 
+// noexcept move: move_if_noexcept must choose the move constructor.
+struct Movable {
+    static int copies;
+    static int moves;
+    static int live;
+ 
+    int value;
+ 
+    explicit Movable(int v = 0) : value(v) { ++live; }
+    Movable(const Movable& o) : value(o.value) { ++copies; ++live; }
+    Movable(Movable&& o) noexcept : value(o.value) { o.value = -1; ++moves; ++live; }
+    Movable& operator=(const Movable& o) { value = o.value; return *this; }
+    ~Movable() { --live; }
+ 
+    static void reset() { copies = moves = live = 0; }
+};
+ 
+int Movable::copies = 0;
+int Movable::moves = 0;
+int Movable::live = 0;
+ 
+// Move constructor NOT marked noexcept: move_if_noexcept must fall back to
+// copying, because a throw partway through a transfer cannot be rolled back.
+struct ThrowingMove {
+    static int copies;
+    static int moves;
+    static int live;
+ 
+    int value;
+ 
+    explicit ThrowingMove(int v = 0) : value(v) { ++live; }
+    ThrowingMove(const ThrowingMove& o) : value(o.value) { ++copies; ++live; }
+    ThrowingMove(ThrowingMove&& o) : value(o.value) { ++moves; ++live; }
+    ThrowingMove& operator=(const ThrowingMove& o) { value = o.value; return *this; }
+    ~ThrowingMove() { --live; }
+ 
+    static void reset() { copies = moves = live = 0; }
+};
+ 
+int ThrowingMove::copies = 0;
+int ThrowingMove::moves = 0;
+int ThrowingMove::live = 0;
+ 
+// ---------------------------------------------------------------------------
+// Basic behaviour
+// ---------------------------------------------------------------------------
+ 
+TEST(Reserve, IncreasesCapacity) {
+    vector<int> v(3, 1);
+    v.reserve(50);
+    EXPECT_GE(v.capacity(), 50u);
+}
+ 
+TEST(Reserve, PreservesSize) {
+    // destroy_all() zeroes size_, so reserve must restore it afterwards.
+    vector<int> v(3, 1);
+    v.reserve(50);
+    EXPECT_EQ(v.size(), 3u) << "reserve changed size(); capacity and size are independent";
+}
+ 
+TEST(Reserve, PreservesElementValues) {
+    vector<int> v(4, 0);
+    for (vector<int>::size_type i = 0; i < v.size(); ++i) v[i] = static_cast<int>(i) * 10;
+ 
+    v.reserve(100);
+ 
+    ASSERT_EQ(v.size(), 4u);
+    EXPECT_EQ(v[0], 0);
+    EXPECT_EQ(v[3], 30);
+}
+ 
+TEST(Reserve, ReallocatesToANewBuffer) {
+    vector<int> v(3, 1);
+    const int* before = v.data();
+    v.reserve(100);
+    EXPECT_NE(v.data(), before) << "capacity grew without a new allocation";
+}
+ 
+TEST(Reserve, ElementsRemainContiguous) {
+    vector<int> v(4, 7);
+    v.reserve(64);
+    EXPECT_EQ(&v[0] + 3, &v[3]);
+    EXPECT_EQ(v.data(), &v[0]);
+}
+ 
+TEST(Reserve, OnAnEmptyVectorAllocates) {
+    vector<int> v;
+    ASSERT_EQ(v.data(), nullptr);
+ 
+    v.reserve(10);
+ 
+    EXPECT_GE(v.capacity(), 10u);
+    EXPECT_EQ(v.size(), 0u);
+    EXPECT_NE(v.data(), nullptr);
+}
+ 
+TEST(Reserve, AccessorsWorkAfterwards) {
+    vector<int> v(3, 5);
+    v.reserve(64);
+    EXPECT_EQ(v.front(), 5);
+    EXPECT_EQ(v.back(), 5);
+    EXPECT_EQ(v.at(2), 5);
+    EXPECT_FALSE(v.empty());
+}
+ 
+// ---------------------------------------------------------------------------
+// No-op cases: reserve must never shrink
+// ---------------------------------------------------------------------------
+ 
+TEST(Reserve, SmallerThanCapacityIsANoOp) {
+    vector<int> v(10, 1);
+    const int* before = v.data();
+    const auto cap = v.capacity();
+ 
+    v.reserve(2);
+ 
+    EXPECT_EQ(v.capacity(), cap) << "reserve shrank the capacity";
+    EXPECT_EQ(v.data(), before) << "reserve reallocated for a smaller request";
+    EXPECT_EQ(v.size(), 10u);
+}
+ 
+TEST(Reserve, EqualToCapacityIsANoOp) {
+    // The <= boundary: reserve(capacity_) must not reallocate.
+    vector<int> v(10, 1);
+    const int* before = v.data();
+ 
+    v.reserve(v.capacity());
+ 
+    EXPECT_EQ(v.data(), before) << "reserve(capacity()) reallocated pointlessly";
+}
+ 
+TEST(Reserve, ZeroIsANoOp) {
+    vector<int> v(5, 1);
+    const int* before = v.data();
+    v.reserve(0);
+    EXPECT_EQ(v.data(), before);
+    EXPECT_EQ(v.size(), 5u);
+}
+ 
+TEST(Reserve, NoOpDoesNoElementWork) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(5);
+        Tracked::copy_ctors = 0;
+        Tracked::dtors = 0;
+ 
+        v.reserve(2);
+ 
+        EXPECT_EQ(Tracked::copy_ctors, 0);
+        EXPECT_EQ(Tracked::dtors, 0) << "a no-op reserve destroyed elements";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// How elements get transferred
+// ---------------------------------------------------------------------------
+ 
+TEST(Reserve, MovesElementsWhenTheMoveIsNoexcept) {
+    // The payoff for marking move constructors noexcept.
+    Movable::reset();
+    {
+        vector<Movable> v(6, Movable(1));
+        Movable::copies = 0;
+        Movable::moves = 0;
+ 
+        v.reserve(100);
+ 
+        EXPECT_EQ(Movable::moves, 6) << "elements were not moved into the new buffer";
+        EXPECT_EQ(Movable::copies, 0) << "reserve copied despite a noexcept move";
+    }
+    EXPECT_EQ(Movable::live, 0);
+}
+ 
+TEST(Reserve, CopiesElementsWhenTheMoveMayThrow) {
+    // move_if_noexcept falls back to copying, because a throw mid-transfer
+    // cannot be undone and the strong guarantee would be lost.
+    ThrowingMove::reset();
+    {
+        vector<ThrowingMove> v(6, ThrowingMove(1));
+        ThrowingMove::copies = 0;
+        ThrowingMove::moves = 0;
+ 
+        v.reserve(100);
+ 
+        EXPECT_EQ(ThrowingMove::copies, 6) << "a throwing move was used for the transfer";
+        EXPECT_EQ(ThrowingMove::moves, 0);
+    }
+    EXPECT_EQ(ThrowingMove::live, 0);
+}
+ 
+TEST(Reserve, DoesNotConstructBeyondSize) {
+    // Slots between size_ and capacity_ stay raw. Constructing them would make
+    // reserve behave like resize.
+    Tracked::reset();
+    {
+        vector<Tracked> v(3);
+        v.reserve(100);
+        EXPECT_EQ(Tracked::live, 3) << "reserve constructed elements in the spare capacity";
+        EXPECT_EQ(v.size(), 3u);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(Reserve, DestroysEachElementExactlyOnce) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(8);
+        v.reserve(200);
+    }
+    // 8 originals destroyed after the transfer, 8 copies destroyed at scope exit.
+    EXPECT_EQ(Tracked::live, 0) << "elements were leaked or destroyed twice";
+}
+ 
+TEST(Reserve, ReleasesTheOldBuffer) {
+    // ASan: the pre-reserve buffer and its strings must be freed exactly once.
+    vector<Owning> v(10, Owning("payload"));
+    v.reserve(500);
+    EXPECT_EQ(v.size(), 10u);
+}
+ 
+TEST(Reserve, RepeatedGrowthDoesNotLeak) {
+    vector<Owning> v(4, Owning("payload"));
+    for (vector<Owning>::size_type cap = 8; cap <= 4096; cap *= 2) {
+        v.reserve(cap);
+        EXPECT_EQ(v.size(), 4u);
+    }
+    SUCCEED();
+}
+ 
+// ---------------------------------------------------------------------------
+// Exception safety
+// ---------------------------------------------------------------------------
+ 
+TEST(Reserve, ThrowingTransferLeavesTheVectorUntouched) {
+    // The strong guarantee: build the new buffer first, and only commit once
+    // every element has arrived. ThrowOnCopy has no move ctor, so the transfer
+    // copies and the budget applies.
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(1);
+        vector<ThrowOnCopy> v(10, proto);
+        const ThrowOnCopy* before = v.data();
+        const auto cap = v.capacity();
+        const int live_before = ThrowOnCopy::live;
+ 
+        ThrowOnCopy::budget = 4;  // fails on the 5th of 10 transfers
+        EXPECT_THROW({ v.reserve(500); }, std::runtime_error);
+ 
+        EXPECT_EQ(v.size(), 10u) << "size changed after a failed reserve";
+        EXPECT_EQ(v.capacity(), cap) << "capacity was committed before the transfer finished";
+        EXPECT_EQ(v.data(), before) << "the original buffer was released";
+        EXPECT_EQ(ThrowOnCopy::live, live_before) << "the partial buffer leaked";
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+TEST(Reserve, VectorStillUsableAfterAFailedReserve) {
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(7);
+        vector<ThrowOnCopy> v(5, proto);
+ 
+        ThrowOnCopy::budget = 2;
+        EXPECT_THROW({ v.reserve(100); }, std::runtime_error);
+ 
+        EXPECT_EQ(v.size(), 5u);
+        EXPECT_EQ(v[4].value, 7) << "the original elements were damaged";
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+TEST(Reserve, AboveMaxSizeThrowsLengthError) {
+    vector<int> v(3, 1);
+    EXPECT_THROW({ v.reserve(v.max_size() + 1); }, std::length_error);
+    EXPECT_EQ(v.size(), 3u) << "the vector was modified before the check";
+}
+ 
+TEST(Reserve, HugeButRepresentableRequestThrowsBadAlloc) {
+    // Under the request limit but far beyond available memory. Needs
+    // ASAN_OPTIONS=allocator_may_return_null=1 to reach the null check.
+    vector<int> v(3, 1);
+    const auto huge = std::numeric_limits<vector<int>::size_type>::max() / sizeof(int) / 2;
+    EXPECT_THROW({ v.reserve(huge); }, std::bad_alloc);
+    EXPECT_EQ(v.size(), 3u);
+}
+ 
+// ---------------------------------------------------------------------------
+// Interaction with the rest of the class
+// ---------------------------------------------------------------------------
+ 
+TEST(Reserve, ReservedCapacitySurvivesAssignment) {
+    // Copy assignment reuses the buffer when capacity allows, so a reserve
+    // beforehand should prevent reallocation.
+    vector<int> a;
+    a.reserve(100);
+    const int* buffer = a.data();
+ 
+    vector<int> b(50, 3);
+    a = b;
+ 
+    EXPECT_EQ(a.data(), buffer) << "assignment reallocated despite reserved capacity";
+    EXPECT_EQ(a.size(), 50u);
+}
+ 
+TEST(Reserve, CapacityIsNotCarriedIntoACopy) {
+    // The copy allocates other.size(), not other.capacity().
+    vector<int> a(3, 1);
+    a.reserve(500);
+ 
+    vector<int> b(a);
+ 
+    EXPECT_EQ(b.size(), 3u);
+    EXPECT_EQ(b.capacity(), 3u) << "the copy allocated the source's spare capacity";
+}
+ 
+TEST(Reserve, CapacityIsCarriedThroughAMove) {
+    vector<int> a(3, 1);
+    a.reserve(500);
+    const auto cap = a.capacity();
+ 
+    vector<int> b(std::move(a));
+ 
+    EXPECT_EQ(b.capacity(), cap) << "the move did not transfer capacity";
+    EXPECT_EQ(a.capacity(), 0u);
+}
+ 
+
+// ---------------------------------------------------------------------------
+// Basic behaviour
+// ---------------------------------------------------------------------------
+ 
+TEST(ShrinkToFit, ReducesCapacityToSize) {
+    vector<int> v(3, 1);
+    v.reserve(500);
+    ASSERT_GE(v.capacity(), 500u);
+ 
+    v.shrink_to_fit();
+ 
+    EXPECT_EQ(v.capacity(), 3u) << "capacity was not reduced to size";
+    EXPECT_EQ(v.size(), 3u);
+}
+ 
+TEST(ShrinkToFit, PreservesElementValues) {
+    vector<int> v(4, 0);
+    for (vector<int>::size_type i = 0; i < v.size(); ++i) v[i] = static_cast<int>(i) * 10;
+    v.reserve(500);
+ 
+    v.shrink_to_fit();
+ 
+    ASSERT_EQ(v.size(), 4u);
+    EXPECT_EQ(v[0], 0);
+    EXPECT_EQ(v[3], 30);
+}
+ 
+TEST(ShrinkToFit, ReallocatesToANewBuffer) {
+    // Capacity is a property of the allocation, so shrinking must actually
+    // allocate a smaller block -- it cannot just lower the member.
+    vector<int> v(3, 1);
+    v.reserve(500);
+    const int* before = v.data();
+ 
+    v.shrink_to_fit();
+ 
+    EXPECT_NE(v.data(), before) << "capacity changed without a new allocation";
+}
+ 
+TEST(ShrinkToFit, ElementsRemainContiguous) {
+    vector<int> v(4, 7);
+    v.reserve(200);
+    v.shrink_to_fit();
+    EXPECT_EQ(&v[0] + 3, &v[3]);
+    EXPECT_EQ(v.data(), &v[0]);
+}
+ 
+TEST(ShrinkToFit, AccessorsWorkAfterwards) {
+    vector<int> v(3, 5);
+    v.reserve(100);
+    v.shrink_to_fit();
+    EXPECT_EQ(v.front(), 5);
+    EXPECT_EQ(v.back(), 5);
+    EXPECT_EQ(v.at(2), 5);
+    EXPECT_FALSE(v.empty());
+}
+ 
+TEST(ShrinkToFit, WorksAfterShrinkingViaAssignment) {
+    // The usual way spare capacity appears: assign a smaller vector.
+    vector<int> v(100, 1);
+    vector<int> small(3, 8);
+    v = small;
+    ASSERT_EQ(v.size(), 3u);
+    ASSERT_GE(v.capacity(), 100u);
+ 
+    v.shrink_to_fit();
+ 
+    EXPECT_EQ(v.capacity(), 3u);
+    EXPECT_EQ(v[2], 8);
+}
+ 
+// ---------------------------------------------------------------------------
+// No-op and empty cases
+// ---------------------------------------------------------------------------
+ 
+TEST(ShrinkToFit, IsANoOpWhenAlreadyExact) {
+    vector<int> v(5, 1);
+    ASSERT_EQ(v.capacity(), v.size());
+    const int* before = v.data();
+ 
+    v.shrink_to_fit();
+ 
+    EXPECT_EQ(v.data(), before) << "reallocated despite capacity already matching size";
+    EXPECT_EQ(v.size(), 5u);
+}
+ 
+TEST(ShrinkToFit, NoOpDoesNoElementWork) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(5);
+        Tracked::copy_ctors = 0;
+        Tracked::dtors = 0;
+ 
+        v.shrink_to_fit();
+ 
+        EXPECT_EQ(Tracked::copy_ctors, 0);
+        EXPECT_EQ(Tracked::dtors, 0) << "a no-op shrink destroyed elements";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(ShrinkToFit, OnAnUnallocatedVectorIsANoOp) {
+    vector<int> v;
+    v.shrink_to_fit();
+    EXPECT_EQ(v.size(), 0u);
+    EXPECT_EQ(v.capacity(), 0u);
+    EXPECT_EQ(v.data(), nullptr);
+}
+ 
+TEST(ShrinkToFit, OnAnEmptyVectorWithCapacityReleasesTheBuffer) {
+    // size_ == 0 and capacity_ > 0: reallocate(0) must free the old block and
+    // leave the vector fully unallocated. Relies on allocate_raw(0) returning
+    // nullptr rather than allocating.
+    vector<int> v;
+    v.reserve(100);
+    ASSERT_NE(v.data(), nullptr);
+ 
+    v.shrink_to_fit();
+ 
+    EXPECT_EQ(v.capacity(), 0u);
+    EXPECT_EQ(v.size(), 0u);
+    EXPECT_EQ(v.data(), nullptr) << "the oversized buffer was not released";
+}
+ 
+TEST(ShrinkToFit, EmptiedVectorReleasesEverything) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(20);
+        vector<Tracked> empty;
+        v = empty;              // size 0, capacity still 20
+        ASSERT_EQ(Tracked::live, 0);
+ 
+        v.shrink_to_fit();
+ 
+        EXPECT_EQ(v.capacity(), 0u);
+        EXPECT_EQ(v.data(), nullptr);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// How elements get transferred
+// ---------------------------------------------------------------------------
+ 
+TEST(ShrinkToFit, MovesElementsWhenTheMoveIsNoexcept) {
+    Movable::reset();
+    {
+        vector<Movable> v(6, Movable(1));
+        v.reserve(500);
+        Movable::copies = 0;
+        Movable::moves = 0;
+ 
+        v.shrink_to_fit();
+ 
+        EXPECT_EQ(Movable::moves, 6);
+        EXPECT_EQ(Movable::copies, 0) << "copied despite a noexcept move";
+    }
+    EXPECT_EQ(Movable::live, 0);
+}
+ 
+TEST(ShrinkToFit, CopiesElementsWhenTheMoveMayThrow) {
+    ThrowingMove::reset();
+    {
+        vector<ThrowingMove> v(6, ThrowingMove(1));
+        v.reserve(500);
+        ThrowingMove::copies = 0;
+        ThrowingMove::moves = 0;
+ 
+        v.shrink_to_fit();
+ 
+        EXPECT_EQ(ThrowingMove::copies, 6) << "a throwing move was used for the transfer";
+        EXPECT_EQ(ThrowingMove::moves, 0);
+    }
+    EXPECT_EQ(ThrowingMove::live, 0);
+}
+ 
+TEST(ShrinkToFit, TransfersExactlySizeElements) {
+    // The slots between size_ and capacity_ hold no objects, so nothing there
+    // is transferred or destroyed.
+    Tracked::reset();
+    {
+        vector<Tracked> v(3);
+        v.reserve(100);
+        Tracked::copy_ctors = 0;
+ 
+        v.shrink_to_fit();
+ 
+        EXPECT_EQ(Tracked::copy_ctors, 3) << "transferred the wrong number of elements";
+        EXPECT_EQ(Tracked::live, 3);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(ShrinkToFit, DestroysEachElementExactlyOnce) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(8);
+        v.reserve(500);
+        v.shrink_to_fit();
+    }
+    EXPECT_EQ(Tracked::live, 0) << "elements were leaked or destroyed twice";
+}
+ 
+TEST(ShrinkToFit, ReleasesTheOldBuffer) {
+    // ASan: the oversized buffer and its strings must be freed exactly once.
+    vector<Owning> v(10, Owning("payload"));
+    v.reserve(1000);
+    v.shrink_to_fit();
+    EXPECT_EQ(v.size(), 10u);
+}
+ 
+TEST(ShrinkToFit, RepeatedGrowShrinkCyclesDoNotLeak) {
+    vector<Owning> v(4, Owning("payload"));
+    for (int i = 0; i < 50; ++i) {
+        v.reserve(1000);
+        v.shrink_to_fit();
+        EXPECT_EQ(v.size(), 4u);
+        EXPECT_EQ(v.capacity(), 4u);
+    }
+    SUCCEED();
+}
+ 
+// ---------------------------------------------------------------------------
+// Exception safety
+// ---------------------------------------------------------------------------
+ 
+TEST(ShrinkToFit, ThrowingTransferLeavesTheVectorUntouched) {
+    // Same strong guarantee as reserve: the new buffer is built before the old
+    // one is released, so a throw must change nothing.
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(1);
+        vector<ThrowOnCopy> v(10, proto);
+        v.reserve(500);
+        const ThrowOnCopy* before = v.data();
+        const auto cap = v.capacity();
+        const int live_before = ThrowOnCopy::live;
+ 
+        ThrowOnCopy::budget = 4;  // fails on the 5th of 10 transfers
+        EXPECT_THROW({ v.shrink_to_fit(); }, std::runtime_error);
+ 
+        EXPECT_EQ(v.size(), 10u);
+        EXPECT_EQ(v.capacity(), cap) << "capacity was committed before the transfer finished";
+        EXPECT_EQ(v.data(), before) << "the original buffer was released";
+        EXPECT_EQ(ThrowOnCopy::live, live_before) << "the partial buffer leaked";
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+TEST(ShrinkToFit, VectorStillUsableAfterAFailedShrink) {
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(7);
+        vector<ThrowOnCopy> v(5, proto);
+        v.reserve(200);
+ 
+        ThrowOnCopy::budget = 2;
+        EXPECT_THROW({ v.shrink_to_fit(); }, std::runtime_error);
+ 
+        EXPECT_EQ(v.size(), 5u);
+        EXPECT_EQ(v[4].value, 7) << "the original elements were damaged";
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// Interaction with reserve and the rest of the class
+// ---------------------------------------------------------------------------
+ 
+TEST(ShrinkToFit, ReserveAfterShrinkStillGrows) {
+    vector<int> v(3, 1);
+    v.reserve(500);
+    v.shrink_to_fit();
+    ASSERT_EQ(v.capacity(), 3u);
+ 
+    v.reserve(50);
+ 
+    EXPECT_GE(v.capacity(), 50u);
+    EXPECT_EQ(v.size(), 3u);
+    EXPECT_EQ(v[2], 1);
+}
+ 
+TEST(ShrinkToFit, ReserveDoesNotUndoIt) {
+    // reserve must never shrink, so a smaller request after shrinking is a no-op.
+    vector<int> v(3, 1);
+    v.reserve(500);
+    v.shrink_to_fit();
+    const int* before = v.data();
+ 
+    v.reserve(2);
+ 
+    EXPECT_EQ(v.data(), before);
+    EXPECT_EQ(v.capacity(), 3u);
+}
+ 
+TEST(ShrinkToFit, CopyOfAShrunkVectorIsUnaffected) {
+    vector<int> a(3, 1);
+    a.reserve(500);
+    vector<int> b(a);          // the copy already allocates only size()
+    a.shrink_to_fit();
+ 
+    EXPECT_EQ(b.size(), 3u);
+    EXPECT_EQ(b.capacity(), 3u);
+    EXPECT_EQ(b[0], 1);
+}
+ 
+TEST(ShrinkToFit, MovedFromVectorIsAlreadyFit) {
+    vector<int> a(3, 1);
+    a.reserve(500);
+    vector<int> b(std::move(a));
+ 
+    a.shrink_to_fit();         // a is unallocated: nothing to do
+ 
+    EXPECT_EQ(a.capacity(), 0u);
+    EXPECT_EQ(a.data(), nullptr);
+    EXPECT_EQ(b.size(), 3u);
+}
+ 
