@@ -31,5 +31,5 @@ jobs:
       - name: Run
         env:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-          ASAN_OPTIONS: detect_leaks=1
+          ASAN_OPTIONS: detect_leaks=1:allocator_may_return_null=1
         run: ./tests
