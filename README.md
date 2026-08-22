@@ -9,6 +9,7 @@ My implementation of `std::vector` for learning sake. Coached by AI but no AI  i
 - [move semantics](https://godbolt.org/z/WzjqYP5e8)
 - [noexcept](https://godbolt.org/z/ovr1cb375)
 - [std::forward](https://godbolt.org/z/Po81o6rWz)
+- [std::sort](https://godbolt.org/z/444YTa1rM)
   
 ## Vector's state rule to keep in mind
 
