@@ -231,7 +231,7 @@ class vector{
             }
             else{
                 //size_ > other.size_
-                for(size_type i=other.size_; i<size_; i++){ // destroy tail elements
+                for(size_type i=other.size_; i<size_; i++){ // Rule III
                     data_[i].~T(); // will not throw (usually noexcept)
                 }
 
@@ -368,6 +368,10 @@ class vector{
             capacity_ = 0;
         }
 
+        //internally only used in push_back, emplace_back
+        //only occurence of move_if_noexcept
+        // Why not move only ? if it can except, we free previously moved element ## and they will be refreed
+        // why not always copy ? If we can save some time by moveing it's better
         void reallocate_(size_type new_cap){
             //Build new THEN destroy THEN metadata
 
@@ -380,10 +384,11 @@ class vector{
             try {
                 for (;built<size_; built++){ 
                 // new (new_ptr+built) T(data_[built]); //Default initialized mistake because it rebuilds !! same as interview
-                    new (new_ptr + built) T(std::move_if_noexcept(data_[built])); // This is ai, explained with example below
+                    new (new_ptr + built) T(std::move_if_noexcept(data_[built])); //AI
+                    // if T's move ctor is noexcept it moves, otherwise it copies
             }
-            } catch(...){
-                for (size_type j = 0; j < built; ++j) new_ptr[j].~T();
+            } catch(...){ // never happnes is move ctor is noexcept
+                for (size_type j = 0; j < built; ++j) new_ptr[j].~T(); 
                 free(new_ptr);
                 throw;
             }
