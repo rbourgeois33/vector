@@ -1,21 +1,4 @@
-
-// TO understand:
-// you only need cleanup where a failure would leave the invariant broken; Understand exactly where catch + throw + destroy is needed or not
-// what is allocator
-
-
-// DONE:
-// Explicit keyword OKAY-ish on count ctor YES so that count is not misunderstood as a value, nowhere else to allow constructors to be used for conversion
-// understand & fix max_size()  (ptr diff) OK: our vector *could* be reprensented in bytes and then we want to be able to substract pointers form each other without overflowing
-// noexcept keyword on move ctor & move_if_noexcept vs move OK-ish still no sure why we dont put it everywhere
-//          noexecpt is a promess to the compiler that the function cant issue exceptions, and changes the behavior of std::move_if_noexcept
-//          move_if_noexcept asks: is T's move constructor noexcept? If yes it moves (fast) if no (and T is copyable) it copies instead. example below
-
-
 //TODO:
-// drop extra const OK
-// fix no pragma once & and #include OK
-// understand well throw catch & fix around the code
 // emplace_back (no aliasing issue ?)
 // begin end, pop_back
 
@@ -27,6 +10,7 @@
 
 #ifndef VECTOR_INCLUDED
 #define VECTOR_INCLUDED
+
 template<class T> 
 class vector{
 
@@ -50,21 +34,22 @@ class vector{
     //vector<int> w = 10;        // compiles — looks like "w holds the value 10"
     explicit vector(size_type count) : data_(nullptr), size_(0), capacity_(0){ //not set to count here. State has to be consistent at all time
         
-        T* ptr = allocate_raw(count);
+        T* ptr = allocate_raw_(count);
         if (!ptr){
             return;
         } else {
             data_=ptr;
         }
 
-        capacity_=count; //eg ok it's allocated now, count is updated
+        capacity_=count; //rule V
 
         try {
-            for (;size_<count; size_++){ //size_+= 1 for 
+            for (;size_<count; size_++){ //at all times, II is verified ...
                 new (data_+size_) T(); //Default initialized
             }
         } catch(...){
-            destroy_all_and_throw();
+            //If any allocation throws, detroy all element util size_(not state lie, II) free ptr and attributes and propagate the throw
+            destroy_all_(); throw;;
         }
 
     }
@@ -72,7 +57,7 @@ class vector{
     //value ctor
     vector( size_type count, const_reference value) : data_(nullptr), size_(0), capacity_(0){
 
-        T* ptr = allocate_raw(count);
+        T* ptr = allocate_raw_(count);
         if (!ptr){
             return;
         } else {
@@ -87,7 +72,7 @@ class vector{
                 new (data_+size_) T(value); //This construct the object T at the desired location but it coult fail T(value) might throw.
             }
         } catch(...){
-            destroy_all_and_throw();
+            destroy_all_(); throw;
         }
     }
 
@@ -97,7 +82,7 @@ class vector{
     //vector<int> f() { return v; }   // the return is copy-init too — dead
     vector( const vector& other ): data_(nullptr), size_(0), capacity_(0) { 
 
-        T* ptr = allocate_raw(other.size_);
+        T* ptr = allocate_raw_(other.size_);
         if (!ptr){
             return;
         } else {
@@ -111,7 +96,7 @@ class vector{
                 new (data_+size_) T(other[size_]); 
         }
         } catch(...){
-            destroy_all_and_throw();
+            destroy_all_(); throw;;
         }
     }
     
@@ -128,7 +113,7 @@ class vector{
 
     //dtor
     ~vector(){
-        destroy_all();
+        destroy_all_();
     }
 
     //================ element access
@@ -209,59 +194,58 @@ class vector{
 
             //Build new THEN destroy THEN metadata
             //build new
-            T* new_ptr = allocate_raw(other.size_);
+            T* new_ptr = allocate_raw_(other.size_);
             
             size_type built=0; 
             //Could fail : = operator
             try {
                 for (;built<other.size_; built++){ 
-                    new (new_ptr+built) T(other[built]); //Default initialized
+                    new (new_ptr+built) T(other[built]); 
                 }
             } catch(...){
+                //if any of the ctor above throw, we destroy the thing we are constructing (all the T up to built & ptr), then propagate the throw
                 for (size_type j = 0; j < built; ++j) new_ptr[j].~T();
                 free(new_ptr);
-                throw;                        // *this is completely untouched
+                throw;  //Throws either jump straight to the potential calling catch block. Rest of the function is not executed
             }
-
             //2 
-            destroy_all(); 
+            destroy_all_(); //never reached if it threw
             //3
             data_=new_ptr; 
             capacity_ = other.size_;
             size_=built;
 
-            return *this;
-        }
+        }else // in this branch no catch bc a handler earns its place only when something would leak or lie without it
+        {
+            //here our elements are initialized until size_ 
+            if (size_<other.size_){ //Never happens if reallocated
 
-        //here our elements are initialized until size_ 
-        if (size_<other.size_){ //Never happens if reallocated
-
-            //= for first elements, no state lie
-            for (size_type i =0;i<size_; i++){ // no catch for =
-                data_[i] = other[i]; //= operator on already initialized element
+                //= for first elements, no state lie
+                for (size_type i =0;i<size_; i++){ // no catch for =
+                    data_[i] = other[i]; //= operator on already initialized element
+                }
+                //new ctr for after elements
+                for (;size_<other.size_; size_++){
+                    new (data_+size_) T(other[size_]); 
+                }
             }
-       
+            else{
+                //size_ > other.size_
+                for(size_type i=other.size_; i<size_; i++){ // destroy tail elements
+                    data_[i].~T(); // will not throw (usually noexcept)
+                }
 
-            //new ctr for after elements
-   
-            for (;size_<other.size_; size_++){
-                new (data_+size_) T(other[size_]); 
+                size_=other.size_; //must be here not below !!! otherwise if it trhows, double free some elements
+
+                //No destroy ! because state is still valid
+                for (size_type i=0;i<other.size_; i++){ // no catch for =
+                    data_[i] = other[i]; //= operator on already initialized element
+                }
+
+                //size_=other.size_;
+            
             }
-        }
-        else{
-            //size_ > other.size_
-
-            for(size_type i=other.size_; i<size_; i++){ // destroy tail elements
-                data_[i].~T(); // will not throw
-            }
-
-            //No destroy ! because state is still valid
-            for (size_type i=0;i<other.size_; i++){ // no catch for =
-                data_[i] = other[i]; //= operator on already initialized element
-            }
-
-            size_=other.size_;
-          
+            
         }
         return *this; 
     }
@@ -271,7 +255,7 @@ class vector{
     vector<T>& operator=(vector<T>&& other) noexcept{
         if (this == &other) return *this;
 
-        destroy_all();
+        destroy_all_();
 
         data_=other.data_;
         capacity_=other.capacity_;
@@ -300,6 +284,7 @@ class vector{
         return capacity_;
     }
 
+    //AI: a little confused about this one
     constexpr size_type max_size()  const noexcept{
         //max value for signed ptr in bytes so that arithmetic stays within bound, / by sizeof(T)
         return std::numeric_limits<ptrdiff_t>::max() / sizeof(T);
@@ -307,18 +292,19 @@ class vector{
 
     //only useful if (new_cap>capacity_)
     void reserve(size_type new_cap){
-        if (new_cap>capacity_) reallocate(new_cap);
+        if (new_cap>capacity_) reallocate_(new_cap);
     }
 
     //causes reallocation !! only useful if (capacity_ > size_) 
     void shrink_to_fit(){
-        if (capacity_ > size_) reallocate(size_);
+        if (capacity_ > size_) reallocate_(size_);
     }
 
     //======================= modifiers
     //destuctors are noexcept
     void clear() noexcept {
-        for (size_type j = 0; j < size_; ++j) data_[j].~T();
+        //rule II is enforced
+        for (size_type j = 0; j < size_; ++j) data_[j].~T(); 
             size_ = 0;
     }
 
@@ -365,7 +351,8 @@ class vector{
         size_type capacity_{0u};
         size_type size_{0u};
 
-        T* allocate_raw(size_type count){
+        //const here ! it does not touch internal state
+        T* allocate_raw_(size_type count) const{
             if (count==0) return nullptr;
             if (count > max_size()) throw std::length_error("too large"); //not >
             T* new_ptr = static_cast<T*>(malloc(count*sizeof(T))); //malloc returns void*, need to cast
@@ -373,26 +360,19 @@ class vector{
             return new_ptr;
         }
 
-        //Cleanup helper 
-        
-        void destroy_all_and_throw(){
-            destroy_all();
-            throw; // program stop here, dtor never called. Okay because in a catch bloc
-        }
-
         //deconstrut until size_
-        void destroy_all() noexcept {
+        void destroy_all_() noexcept {
             clear();
-            if (data_) free(data_);
+            if (data_) free(data_); // then rule IV
             data_ = nullptr;
             capacity_ = 0;
         }
 
-        void reallocate(size_type new_cap){
+        void reallocate_(size_type new_cap){
             //Build new THEN destroy THEN metadata
 
             assert(new_cap>=size_);
-            T* new_ptr = allocate_raw(new_cap);
+            T* new_ptr = allocate_raw_(new_cap);
                 
             size_type built=0; 
             //Could fail : = operator
@@ -405,15 +385,16 @@ class vector{
             } catch(...){
                 for (size_type j = 0; j < built; ++j) new_ptr[j].~T();
                 free(new_ptr);
-                throw;                        // *this is completely untouched
+                throw;
             }
 
             //2 
             size_type old_size = size_;
-            destroy_all(); // killing size is too mich here, we save it before hands
-            size_ = old_size;
-
+            destroy_all_(); // killing size is too mich here, we save it before hands
+            
             //3
+            //enforce II, III, V at the same time
+            size_ = old_size;
             data_=new_ptr; 
             capacity_ = new_cap;
         }
