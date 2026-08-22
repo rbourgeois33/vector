@@ -1,11 +1,4 @@
 #include <gtest/gtest.h>
-
-#include <cstdint>
-#include <limits>
-#include <new>
-#include <stdexcept>
-#include <string>
-
 #include "vector.h"
 
 // ---------------------------------------------------------------------------

@@ -1,12 +1,10 @@
+
 // TO understand:
 // you only need cleanup where a failure would leave the invariant broken; Understand exactly where catch + throw + destroy is needed or not
-// does throw early returns ?
 // what is allocator
 
 
-
 // DONE:
-// understand if (this == &other) return *this OK
 // Explicit keyword OKAY-ish on count ctor YES so that count is not misunderstood as a value, nowhere else to allow constructors to be used for conversion
 // understand & fix max_size()  (ptr diff) OK: our vector *could* be reprensented in bytes and then we want to be able to substract pointers form each other without overflowing
 // noexcept keyword on move ctor & move_if_noexcept vs move OK-ish still no sure why we dont put it everywhere
@@ -15,10 +13,20 @@
 
 
 //TODO:
-// resize
-// emplace_back
+// drop extra const OK
+// fix no pragma once & and #include OK
+// understand well throw catch & fix around the code
+// emplace_back (no aliasing issue ?)
+// begin end, pop_back
 
+#include <cstdint>
+#include <limits>
+#include <new>
+#include <stdexcept>
+#include <string>
 
+#ifndef VECTOR_INCLUDED
+#define VECTOR_INCLUDED
 template<class T> 
 class vector{
 
@@ -284,11 +292,11 @@ class vector{
         return size_==0;
     }
 
-    const size_type size() const noexcept { //const -> does not change state
+    size_type size() const noexcept { //const -> does not change state, useless for value return 
         return size_;
     }
 
-    const size_type capacity()  const noexcept { //const -> does not change state
+    size_type capacity()  const noexcept { //const -> does not change state
         return capacity_;
     }
 
@@ -412,61 +420,7 @@ class vector{
 
 };
 
-//pointer operator
-/*
-#include<iostream>
-int main(){
 
-    int a =5;
-    inreference b=a;
+#endif //VECTOR_INCLUDED
 
-    int*a_ptr = &a; //& on a value -> pointer
 
-    std::cout<<a<<std::endl;
-    std::cout<<b<<std::endl;
-    std::cout<<a_ptr<<std::endl;
-    std::cout<<&b<<std::endl; //& on a reference -> pointer
-    std::cout<<&a<<std::endl; //& on a reference -> pointer
-    std::cout<<*a_ptr<<std::endl; // *on a pointer -> object
-
-    //donc &other when other is a ref: pointer, this=pointer of the current object, *this -> object then passed by reference. same code for object return
-
-    return 0;
-}
-*/
-
-/* no except stuff 
-int copies = 0;
-
-struct Slow {
-    std::string s;
-    explicit Slow(std::string v) : s(std::move(v)) {}
-    Slow(Slow&& o) : s(std::move(o.s)) {}          // author forgot noexcept
-    Slow(const Slow& o) : s(o.s) { ++copies; }
-};
-
-struct Fast {
-    std::string s;
-    explicit Fast(std::string v) : s(std::move(v)) {}
-    Fast(Fast&& o) noexcept : s(std::move(o.s)) {} // only difference
-    Fast(const Fast& o) : s(o.s) { ++copies; }
-};
-
-int main() {
-    {
-        std::vector<Slow> v;
-        for (int i = 0; i < 1000; ++i)
-            v.push_back(Slow("some string long enough to heap-allocate"));
-        std::printf("Slow: %d copies\n", copies);
-    }
-    copies = 0;
-    {
-        std::vector<Fast> v;
-        for (int i = 0; i < 1000; ++i)
-            v.push_back(Fast("some string long enough to heap-allocate"));
-        std::printf("Fast: %d copies\n", copies);
-    }
-}
-Slow: many copies: move_if_noexcept of reallocate calls copy ctor
-Fast: 0 copies: move_if_noexcept of reallocate move  ctor
-} */
