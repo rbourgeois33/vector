@@ -315,7 +315,7 @@ class vector{
 
         if (size_==capacity_){
             T tmp = value; // value may alias into data_; copy it out before reserve() frees the buffer
-            reserve(capacity_==0 ? 1:capacity_*2); // as discussed in itw
+            reserve(new_cap_policy_()); // as discussed in itw
             new (data_+size_) T(tmp);
             size_+=1;
             return;
@@ -329,7 +329,7 @@ class vector{
         //danger: if value is from this, its garbage after reallocation
         if (size_==capacity_){
             auto tmp = std::move(value); // value may alias into data_; copy it out before reserve() frees the buffer
-            reserve(capacity_==0 ? 1:capacity_*2); // as discussed in itw
+            reserve(new_cap_policy_()); // as discussed in itw
             new (data_+size_) T(std::move(tmp)); // 2 moves 
             size_+=1;
             return;
@@ -339,6 +339,61 @@ class vector{
         size_+=1;
     }
 
+    //The mighty
+    //Appends a new element to the end of the container. The element is constructed through std::allocator_traits::construct, which typically uses placement-new to construct the element in-place 
+    //at the location provided by the container. The arguments args... are forwarded to the constructor as std::forward<Args>(args).... 
+    //If after the operation the new size() is greater than old capacity() a reallocation takes place,
+    // universal ref bc we might call copy or move ctor
+    //move_if_noexcept explained below
+    template< class... Args >
+    reference emplace_back( Args&&... args ){
+
+        if (size_==capacity_){
+
+
+            size_t new_cap = new_cap_policy_();
+            T* new_ptr = allocate_raw_(new_cap);
+
+            size_type built=0; 
+
+            //to avoid aliasing issue if args is v[0], it will be moved later !!
+            try{
+                 new (new_ptr + size_) T(std::forward<Args>(args)...);
+            }catch(...){
+                //new_ptr[size_].~T();  no need, placement new threw
+                free(new_ptr);
+                throw;
+            }
+
+            //Now the last element is built, we build the other, not a problem if data[built] corresponds to args and is moved now
+            try {
+                for (;built<size_; built++){ 
+                    new (new_ptr + built) T(std::move_if_noexcept(data_[built]));
+                }
+            } catch(...){ // never happnes is move ctor is noexcept
+                for (size_type j = 0; j < built; ++j) new_ptr[j].~T(); 
+                new_ptr[size_].~T();      // the element built in the first try
+                free(new_ptr);
+                throw;
+            }
+
+            //destroy current state
+            size_type old_size = size_;
+            destroy_all_(); // killing size is too mich here, we save it before hands
+            
+            //update metatdata
+            //enforce II, III, V at the same time
+            size_=old_size+1;
+            data_=new_ptr; 
+            capacity_ = new_cap;
+
+            return data_[size_-1];
+        }
+
+        new (data_+size_) T(std::forward<Args>(args)...);
+        size_+=1;
+        return data_[size_-1];
+    }
 
 
 
@@ -350,6 +405,10 @@ class vector{
         T* data_{nullptr};
         size_type capacity_{0u};
         size_type size_{0u};
+
+        size_type new_cap_policy_(){
+            return capacity_==0 ? 1:capacity_*2;
+        }
 
         //const here ! it does not touch internal state
         T* allocate_raw_(size_type count) const{
@@ -379,8 +438,6 @@ class vector{
             T* new_ptr = allocate_raw_(new_cap);
                 
             size_type built=0; 
-            //Could fail : = operator
-            //choice: new items that are > size but < capacity are no even initialized ?
             try {
                 for (;built<size_; built++){ 
                 // new (new_ptr+built) T(data_[built]); //Default initialized mistake because it rebuilds !! same as interview

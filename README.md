@@ -8,6 +8,7 @@ My implementation of `std::vector` for learning sake. No AI (except small identi
 - [exceptions, throws, catch](https://godbolt.org/z/89Kd7v8hj)
 - [move semantics](https://godbolt.org/z/WzjqYP5e8)
 - [noexcept](https://godbolt.org/z/ovr1cb375)
+- [std::forward](https://godbolt.org/z/Po81o6rWz)
   
 ## Vector's state rule to keep in mind
 
