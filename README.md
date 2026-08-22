@@ -22,3 +22,7 @@ My implementation of `std::vector` for learning sake. Coached by AI but no AI  i
 ## Aliasing in push_back, emplace_back
 
 Both push back and emplace back can have an aliasing problem if the argument is owned by the vector an a reallocation is needed.
+
+## algorithms.cpp
+
+Some sample code using the stl algorithms

@@ -4,6 +4,9 @@ project(vector_exercise LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+add_compile_options(-fexperimental-library)
+add_link_options(-fexperimental-library)
+
 include(FetchContent)
 
 FetchContent_Declare(googletest
@@ -22,3 +25,5 @@ target_link_libraries(tests PRIVATE GTest::gtest_main benchmark::benchmark)
 
 enable_testing()
 add_test(NAME tests COMMAND tests)
+
+add_executable(algorithms algorithms.cpp)

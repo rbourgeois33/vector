@@ -7,7 +7,7 @@
 #include <cassert>
 #include <utility>
 #include <cstdlib>
-
+#include <iostream>
 
 #ifndef VECTOR_INCLUDED
 #define VECTOR_INCLUDED
@@ -21,6 +21,8 @@ class vector{
     using size_type = size_t;
     using reference = value_type&;
     using const_reference = const value_type&;
+    using iterator = T*;
+    using const_iterator = const T*;
 
     //======================== Ctors // Dtors
     //default ctor
@@ -367,11 +369,31 @@ class vector{
     }
     //it's just a special case of emplace_back where the constructor is copy, and argument value
     void push_back( const T& value ){emplace_back(value);}
+    
     //Moved version
     //call v.push_back(5). 5 is moved into value, has to be re-moved into emplace back
     void push_back(T&& value ){emplace_back(std::move(value));}
 
+    // ============ iterators
 
+    iterator       begin()       noexcept { return data_; }
+    iterator       end()         noexcept { return data_ + size_; }
+    const_iterator begin() const noexcept { return data_; }
+    const_iterator end()   const noexcept { return data_ + size_; }
+    const_iterator cbegin() const noexcept { return data_; }
+    const_iterator cend()   const noexcept { return data_ + size_; }
+
+    // ============ whatever I want
+
+    void print(){
+        
+        for (size_t i = 0; i < size_-1; i++)
+        {
+            std::cout<<at(i)<<", ";
+        }
+        
+        std::cout<<at(size_-1)<<std::endl;
+    }
     // ============ private
 
     private:
