@@ -1,7 +1,4 @@
-//TODO:
-// emplace_back (no aliasing issue ?)
-// begin end, pop_back
-
+// (almost) no AI code in here
 #include <cstdint>
 #include <limits>
 #include <new>
@@ -345,16 +342,15 @@ class vector{
     //If after the operation the new size() is greater than old capacity() a reallocation takes place,
     // universal ref bc we might call copy or move ctor
     //move_if_noexcept explained below
+    //done better than push back bc constructor is called just once
     template< class... Args >
     reference emplace_back( Args&&... args ){
 
         if (size_==capacity_){
 
-
             size_t new_cap = new_cap_policy_();
             T* new_ptr = allocate_raw_(new_cap);
 
-            size_type built=0; 
 
             //to avoid aliasing issue if args is v[0], it will be moved later !!
             try{
@@ -364,6 +360,8 @@ class vector{
                 free(new_ptr);
                 throw;
             }
+
+            size_type built=0; 
 
             //Now the last element is built, we build the other, not a problem if data[built] corresponds to args and is moved now
             try {
@@ -394,9 +392,6 @@ class vector{
         size_+=1;
         return data_[size_-1];
     }
-
-
-
 
 
     // ============ private

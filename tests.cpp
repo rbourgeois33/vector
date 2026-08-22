@@ -1,3 +1,5 @@
+//Fully AI generated for the exercice
+
 #include <gtest/gtest.h>
 #include "vector.h"
 
@@ -2852,5 +2854,488 @@ TEST(PushBack, VectorStillUsableAfterAFailedPush) {
         EXPECT_EQ(v.size(), 2u);
     }
     EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+
+// ---------------------------------------------------------------------------
+// Element types for forwarding checks
+// ---------------------------------------------------------------------------
+ 
+// Records which constructor ran and how many arguments it received.
+struct MultiArg {
+    static int default_ctors;
+    static int two_arg_ctors;
+    static int three_arg_ctors;
+    static int copies;
+    static int moves;
+    static int live;
+ 
+    int a{0};
+    double b{0.0};
+    std::string c;
+ 
+    MultiArg() { ++default_ctors; ++live; }
+    MultiArg(int a_, double b_) : a(a_), b(b_) { ++two_arg_ctors; ++live; }
+    MultiArg(int a_, double b_, std::string c_)
+        : a(a_), b(b_), c(std::move(c_)) { ++three_arg_ctors; ++live; }
+    MultiArg(const MultiArg& o) : a(o.a), b(o.b), c(o.c) { ++copies; ++live; }
+    MultiArg(MultiArg&& o) noexcept
+        : a(o.a), b(o.b), c(std::move(o.c)) { ++moves; ++live; }
+    ~MultiArg() { --live; }
+ 
+    static void reset() {
+        default_ctors = two_arg_ctors = three_arg_ctors = copies = moves = live = 0;
+    }
+};
+ 
+int MultiArg::default_ctors = 0;
+int MultiArg::two_arg_ctors = 0;
+int MultiArg::three_arg_ctors = 0;
+int MultiArg::copies = 0;
+int MultiArg::moves = 0;
+int MultiArg::live = 0;
+ 
+// Reports whether its argument arrived as an lvalue or an rvalue, and as const
+// or non-const. This is what "perfect forwarding" actually means.
+struct ForwardProbe {
+    static int from_lvalue;
+    static int from_const_lvalue;
+    static int from_rvalue;
+ 
+    struct Source { int v{0}; };
+ 
+    explicit ForwardProbe(Source&) { ++from_lvalue; }
+    explicit ForwardProbe(const Source&) { ++from_const_lvalue; }
+    explicit ForwardProbe(Source&&) { ++from_rvalue; }
+ 
+    static void reset() { from_lvalue = from_const_lvalue = from_rvalue = 0; }
+};
+ 
+int ForwardProbe::from_lvalue = 0;
+int ForwardProbe::from_const_lvalue = 0;
+int ForwardProbe::from_rvalue = 0;
+ 
+
+ 
+// ---------------------------------------------------------------------------
+// Basic behaviour
+// ---------------------------------------------------------------------------
+ 
+TEST(EmplaceBack, AppendsToAnEmptyVector) {
+    vector<int> v;
+    v.emplace_back(7);
+    ASSERT_EQ(v.size(), 1u);
+    EXPECT_EQ(v[0], 7);
+}
+ 
+TEST(EmplaceBack, AppendsInOrder) {
+    vector<int> v;
+    for (int i = 0; i < 10; ++i) v.emplace_back(i);
+    ASSERT_EQ(v.size(), 10u);
+    for (int i = 0; i < 10; ++i) EXPECT_EQ(v[i], i);
+}
+ 
+TEST(EmplaceBack, UpdatesBack) {
+    vector<int> v;
+    v.emplace_back(1);
+    v.emplace_back(2);
+    EXPECT_EQ(v.back(), 2);
+    EXPECT_EQ(v.front(), 1);
+}
+ 
+TEST(EmplaceBack, WithNoArgumentsValueInitializes) {
+    // T() -- zeros for scalars, the default constructor for classes.
+    vector<int> v;
+    v.emplace_back();
+    ASSERT_EQ(v.size(), 1u);
+    EXPECT_EQ(v[0], 0);
+}
+ 
+TEST(EmplaceBack, WithNoArgumentsCallsTheDefaultCtor) {
+    MultiArg::reset();
+    {
+        vector<MultiArg> v;
+        v.emplace_back();
+        EXPECT_EQ(MultiArg::default_ctors, 1);
+        EXPECT_EQ(MultiArg::copies, 0);
+        EXPECT_EQ(MultiArg::moves, 0);
+    }
+    EXPECT_EQ(MultiArg::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// In-place construction: the whole point
+// ---------------------------------------------------------------------------
+ 
+TEST(EmplaceBack, ConstructsInPlaceWithoutATemporary) {
+    // push_back(MultiArg(1, 2.0)) builds a temporary and moves it.
+    // emplace_back(1, 2.0) builds the object directly in the slot.
+    MultiArg::reset();
+    {
+        vector<MultiArg> v;
+        v.reserve(4);
+ 
+        v.emplace_back(1, 2.0);
+ 
+        EXPECT_EQ(MultiArg::two_arg_ctors, 1) << "the two-argument ctor was not used";
+        EXPECT_EQ(MultiArg::copies, 0) << "a temporary was copied into place";
+        EXPECT_EQ(MultiArg::moves, 0) << "a temporary was moved into place";
+        EXPECT_EQ(MultiArg::live, 1);
+    }
+    EXPECT_EQ(MultiArg::live, 0);
+}
+ 
+TEST(EmplaceBack, ForwardsThreeArguments) {
+    MultiArg::reset();
+    {
+        vector<MultiArg> v;
+        v.reserve(4);
+ 
+        v.emplace_back(5, 1.5, std::string("hello"));
+ 
+        ASSERT_EQ(v.size(), 1u);
+        EXPECT_EQ(MultiArg::three_arg_ctors, 1);
+        EXPECT_EQ(v[0].a, 5);
+        EXPECT_EQ(v[0].b, 1.5);
+        EXPECT_EQ(v[0].c, "hello");
+    }
+    EXPECT_EQ(MultiArg::live, 0);
+}
+ 
+TEST(EmplaceBack, ComparedWithPushBack) {
+    // Same result, different cost. This documents the difference rather than
+    // testing a requirement.
+    MultiArg::reset();
+    {
+        vector<MultiArg> v;
+        v.reserve(4);
+ 
+        v.emplace_back(1, 2.0);
+        const int after_emplace = MultiArg::copies + MultiArg::moves;
+ 
+        v.push_back(MultiArg(1, 2.0));
+        const int after_push = MultiArg::copies + MultiArg::moves;
+ 
+        EXPECT_EQ(after_emplace, 0);
+        EXPECT_GT(after_push, after_emplace) << "push_back should cost an extra move";
+    }
+    EXPECT_EQ(MultiArg::live, 0);
+}
+
+TEST(EmplaceBack, BuildsStringsFromRawArguments) {
+    vector<std::string> v;
+    v.reserve(4);
+    v.emplace_back(5, 'x');          // the (count, char) string constructor
+    ASSERT_EQ(v.size(), 1u);
+    EXPECT_EQ(v[0], "xxxxx");
+}
+ 
+// ---------------------------------------------------------------------------
+// Perfect forwarding
+// ---------------------------------------------------------------------------
+ 
+TEST(EmplaceBack, ForwardsLvaluesAsLvalues) {
+    ForwardProbe::reset();
+    vector<ForwardProbe> v;
+    v.reserve(4);
+ 
+    ForwardProbe::Source s;
+    v.emplace_back(s);
+ 
+    EXPECT_EQ(ForwardProbe::from_lvalue, 1) << "an lvalue arrived as something else";
+    EXPECT_EQ(ForwardProbe::from_rvalue, 0);
+}
+ 
+TEST(EmplaceBack, ForwardsConstLvaluesAsConstLvalues) {
+    ForwardProbe::reset();
+    vector<ForwardProbe> v;
+    v.reserve(4);
+ 
+    const ForwardProbe::Source s;
+    v.emplace_back(s);
+ 
+    EXPECT_EQ(ForwardProbe::from_const_lvalue, 1) << "constness was lost in forwarding";
+    EXPECT_EQ(ForwardProbe::from_lvalue, 0);
+}
+ 
+TEST(EmplaceBack, ForwardsRvaluesAsRvalues) {
+    ForwardProbe::reset();
+    vector<ForwardProbe> v;
+    v.reserve(4);
+ 
+    v.emplace_back(ForwardProbe::Source{});
+ 
+    EXPECT_EQ(ForwardProbe::from_rvalue, 1) << "an rvalue decayed to an lvalue";
+    EXPECT_EQ(ForwardProbe::from_lvalue, 0);
+}
+ 
+TEST(EmplaceBack, MovesAMovedArgument) {
+    vector<std::string> v;
+    v.reserve(4);
+ 
+    std::string s = "a reasonably long string that will not fit in SSO storage";
+    const char* buffer = s.data();
+ 
+    v.emplace_back(std::move(s));
+ 
+    EXPECT_EQ(v[0].data(), buffer) << "std::move was not forwarded through";
+}
+ 
+TEST(EmplaceBack, CopiesAnUnmovedArgument) {
+    vector<std::string> v;
+    v.reserve(4);
+ 
+    std::string s = "a reasonably long string that will not fit in SSO storage";
+    v.emplace_back(s);
+ 
+    EXPECT_EQ(s, "a reasonably long string that will not fit in SSO storage")
+        << "the source was gutted even though it was passed as an lvalue";
+    EXPECT_EQ(v[0], s);
+}
+ 
+TEST(EmplaceBack, AcceptsAnExistingElementByCopy) {
+    MultiArg::reset();
+    {
+        vector<MultiArg> v;
+        v.reserve(4);
+        v.emplace_back(1, 2.0);
+        MultiArg::copies = 0;
+ 
+        v.emplace_back(v[0]);        // copy constructor via forwarding
+ 
+        EXPECT_EQ(MultiArg::copies, 1);
+        EXPECT_EQ(v[1].a, 1);
+    }
+    EXPECT_EQ(MultiArg::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// Return value
+// ---------------------------------------------------------------------------
+ 
+TEST(EmplaceBack, ReturnsAReferenceToTheNewElement) {
+    vector<int> v;
+    int& r = v.emplace_back(9);
+    EXPECT_EQ(&r, &v[0]);
+    r = 11;
+    EXPECT_EQ(v[0], 11) << "the returned reference does not alias the element";
+}
+ 
+TEST(EmplaceBack, ReturnedReferenceIsTheLastElement) {
+    vector<int> v;
+    v.emplace_back(1);
+    int& r = v.emplace_back(2);
+    EXPECT_EQ(&r, &v.back());
+}
+ 
+// ---------------------------------------------------------------------------
+// Growth
+// ---------------------------------------------------------------------------
+ 
+TEST(EmplaceBack, GrowsWhenFull) {
+    vector<int> v;
+    v.reserve(2);
+    v.emplace_back(1);
+    v.emplace_back(2);
+    ASSERT_EQ(v.size(), v.capacity());
+ 
+    v.emplace_back(3);
+ 
+    EXPECT_GT(v.capacity(), 2u);
+    EXPECT_EQ(v.size(), 3u);
+    EXPECT_EQ(v[0], 1) << "existing elements were lost during growth";
+    EXPECT_EQ(v[2], 3);
+}
+ 
+TEST(EmplaceBack, GrowthIsGeometric) {
+    vector<int> v;
+    const int* last = nullptr;
+    int reallocations = 0;
+    for (int i = 0; i < 1000; ++i) {
+        v.emplace_back(i);
+        if (v.data() != last) { ++reallocations; last = v.data(); }
+    }
+    EXPECT_LT(reallocations, 30);
+    EXPECT_EQ(v.size(), 1000u);
+}
+ 
+TEST(EmplaceBack, MovesExistingElementsWhenGrowing) {
+    Movable::reset();
+    {
+        vector<Movable> v;
+        v.reserve(4);
+        for (int i = 0; i < 4; ++i) v.emplace_back(i);
+        Movable::copies = 0;
+        Movable::moves = 0;
+ 
+        v.emplace_back(99);
+ 
+        EXPECT_EQ(Movable::copies, 0) << "existing elements were copied during growth";
+        EXPECT_GE(Movable::moves, 4);
+    }
+    EXPECT_EQ(Movable::live, 0);
+}
+ 
+TEST(EmplaceBack, StillConstructsInPlaceAcrossAReallocation) {
+    // The growth path must not fall back to building a temporary and moving it.
+    MultiArg::reset();
+    {
+        vector<MultiArg> v;
+        v.reserve(1);
+        v.emplace_back(1, 1.0);
+        MultiArg::two_arg_ctors = 0;
+        MultiArg::copies = 0;
+        const int moves_before = MultiArg::moves;
+ 
+        v.emplace_back(2, 2.0);      // forces growth
+ 
+        EXPECT_EQ(MultiArg::two_arg_ctors, 1);
+        EXPECT_EQ(MultiArg::copies, 0);
+        EXPECT_EQ(MultiArg::moves, moves_before + 1)
+            << "the new element was moved as well as constructed";
+    }
+    EXPECT_EQ(MultiArg::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// Aliasing
+// ---------------------------------------------------------------------------
+ 
+TEST(EmplaceBack, SelfReferencingEmplaceSurvivesReallocation) {
+    // v.emplace_back(v[0]) when full: the argument refers into the buffer that
+    // growth is about to free. Unlike push_back, there is no generic way to
+    // copy an argument pack aside first -- the new element must be built into
+    // the new buffer before the old one is released.
+    vector<int> v;
+    v.reserve(4);
+    for (int i = 1; i <= 4; ++i) v.emplace_back(i);
+    ASSERT_EQ(v.size(), v.capacity());
+ 
+    v.emplace_back(v[0]);
+ 
+    ASSERT_EQ(v.size(), 5u);
+    EXPECT_EQ(v.back(), 1) << "emplace_back read from the buffer it had already freed";
+}
+ 
+TEST(EmplaceBack, SelfReferencingStringEmplaceSurvivesReallocation) {
+    vector<std::string> v;
+    v.reserve(2);
+    v.emplace_back("first");
+    v.emplace_back("second");
+    ASSERT_EQ(v.size(), v.capacity());
+ 
+    v.emplace_back(v[0]);
+ 
+    ASSERT_EQ(v.size(), 3u);
+    EXPECT_EQ(v[2], "first");
+}
+ 
+// ---------------------------------------------------------------------------
+// Lifetime and exception safety
+// ---------------------------------------------------------------------------
+ 
+TEST(EmplaceBack, EveryElementIsDestroyedExactlyOnce) {
+    Tracked::reset();
+    {
+        vector<Tracked> v;
+        for (int i = 0; i < 50; ++i) v.emplace_back(i);
+        EXPECT_EQ(Tracked::live, 50);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+ 
+TEST(EmplaceBack, ReleasesResourcesAcrossManyReallocations) {
+    vector<Owning> v;
+    for (int i = 0; i < 200; ++i) v.emplace_back("payload");
+    EXPECT_EQ(v.size(), 200u);
+}
+ 
+TEST(EmplaceBack, ThrowingConstructionLeavesTheVectorUnchanged) {
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(1);
+        vector<ThrowOnCopy> v;
+        v.reserve(10);
+        for (int i = 0; i < 3; ++i) v.emplace_back(proto);
+        ASSERT_EQ(v.size(), 3u);
+ 
+        ThrowOnCopy::budget = 0;
+        EXPECT_THROW({ v.emplace_back(proto); }, std::runtime_error);
+ 
+        EXPECT_EQ(v.size(), 3u) << "size counted an element that was never built";
+        EXPECT_EQ(v.back().value, 1);
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+TEST(EmplaceBack, ThrowingGrowthLeavesTheVectorUnchanged) {
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(7);
+        vector<ThrowOnCopy> v;
+        v.reserve(4);
+        for (int i = 0; i < 4; ++i) v.emplace_back(proto);
+        const ThrowOnCopy* buffer = v.data();
+        const auto cap = v.capacity();
+ 
+        ThrowOnCopy::budget = 2;
+        EXPECT_THROW({ v.emplace_back(proto); }, std::runtime_error);
+ 
+        EXPECT_EQ(v.size(), 4u);
+        EXPECT_EQ(v.capacity(), cap);
+        EXPECT_EQ(v.data(), buffer) << "the original buffer was released";
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+TEST(EmplaceBack, VectorStillUsableAfterAFailedEmplace) {
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(3);
+        vector<ThrowOnCopy> v;
+        v.reserve(10);
+        v.emplace_back(proto);
+ 
+        ThrowOnCopy::budget = 0;
+        EXPECT_THROW({ v.emplace_back(proto); }, std::runtime_error);
+ 
+        ThrowOnCopy::budget = 5;
+        EXPECT_NO_THROW({ v.emplace_back(proto); });
+        EXPECT_EQ(v.size(), 2u);
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+ 
+// ---------------------------------------------------------------------------
+// Interaction with the rest of the class
+// ---------------------------------------------------------------------------
+ 
+TEST(EmplaceBack, AfterClearReusesTheBuffer) {
+    vector<int> v;
+    v.reserve(100);
+    for (int i = 0; i < 100; ++i) v.emplace_back(i);
+    const int* buffer = v.data();
+ 
+    v.clear();
+    for (int i = 0; i < 100; ++i) v.emplace_back(i * 2);
+ 
+    EXPECT_EQ(v.data(), buffer);
+    EXPECT_EQ(v[99], 198);
+}
+ 
+TEST(EmplaceBack, WorksOnAMovedFromVector) {
+    vector<int> a(3, 1);
+    vector<int> b(std::move(a));
+    a.emplace_back(42);
+    ASSERT_EQ(a.size(), 1u);
+    EXPECT_EQ(a[0], 42);
+}
+ 
+TEST(EmplaceBack, ContentsSurviveACopy) {
+    vector<MultiArg> a;
+    a.emplace_back(1, 2.0, std::string("x"));
+    vector<MultiArg> b(a);
+    ASSERT_EQ(b.size(), 1u);
+    EXPECT_EQ(b[0].c, "x");
 }
  
