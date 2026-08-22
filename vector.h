@@ -4,6 +4,10 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <cassert>
+#include <utility>
+#include <cstdlib>
+
 
 #ifndef VECTOR_INCLUDED
 #define VECTOR_INCLUDED
@@ -20,7 +24,7 @@ class vector{
 
     //======================== Ctors // Dtors
     //default ctor
-    vector() noexcept : data_(nullptr), size_(0), capacity_(0) {}
+    vector() noexcept : data_(nullptr), size_(0), capacity_(0) /*same order as declaration in private */{}
 
     //count ctor. Explicit needed because size_type -> std::vector<size_t> can happen
     //explicit: no implicit conversion these could happen
@@ -305,37 +309,6 @@ class vector{
             size_ = 0;
     }
 
-
-    //TODO can be improved Or construct into the new buffer before freeing the old one
-    void push_back( const T& value ){
-        //danger: if value is from this, its garbage after reallocation
-
-        if (size_==capacity_){
-            T tmp = value; // value may alias into data_; copy it out before reserve() frees the buffer
-            reserve(new_cap_policy_()); // as discussed in itw
-            new (data_+size_) T(tmp);
-            size_+=1;
-            return;
-        }
-
-        new (data_+size_) T(value); //We construct a new element with copy ctor
-        size_+=1;
-    }
-
-       void push_back(T&& value ){
-        //danger: if value is from this, its garbage after reallocation
-        if (size_==capacity_){
-            auto tmp = std::move(value); // value may alias into data_; copy it out before reserve() frees the buffer
-            reserve(new_cap_policy_()); // as discussed in itw
-            new (data_+size_) T(std::move(tmp)); // 2 moves 
-            size_+=1;
-            return;
-        }
-
-        new (data_+size_) T(std::move(value)); //We construct a new element with move ctor
-        size_+=1;
-    }
-
     //The mighty
     //Appends a new element to the end of the container. The element is constructed through std::allocator_traits::construct, which typically uses placement-new to construct the element in-place 
     //at the location provided by the container. The arguments args... are forwarded to the constructor as std::forward<Args>(args).... 
@@ -392,14 +365,19 @@ class vector{
         size_+=1;
         return data_[size_-1];
     }
+    //it's just a special case of emplace_back where the constructor is copy, and argument value
+    void push_back( const T& value ){emplace_back(value);}
+    //Moved version
+    //call v.push_back(5). 5 is moved into value, has to be re-moved into emplace back
+    void push_back(T&& value ){emplace_back(std::move(value));}
 
 
     // ============ private
 
     private:
         T* data_{nullptr};
-        size_type capacity_{0u};
         size_type size_{0u};
+        size_type capacity_{0u};
 
         size_type new_cap_policy_(){
             return capacity_==0 ? 1:capacity_*2;

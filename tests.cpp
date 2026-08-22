@@ -680,7 +680,6 @@ TEST(MoveCtor, LargeVectorCostsNothing) {
 //   B. size_ < other.size_       -> assign prefix, construct the rest (basic)
 //   C. size_ >= other.size_      -> assign prefix, destroy the tail (basic)
 
-#include <utility>
 
 // Throws from operator= after `budget` successful assignments. The copy ctor
 // never throws, so only the reuse branches are affected.

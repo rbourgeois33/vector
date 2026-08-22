@@ -18,7 +18,6 @@ FetchContent_Declare(benchmark
 FetchContent_MakeAvailable(benchmark)
 
 add_executable(tests tests.cpp)
-target_include_directories(tests PRIVATE include)
 target_link_libraries(tests PRIVATE GTest::gtest_main benchmark::benchmark)
 
 enable_testing()
