@@ -1,6 +1,6 @@
 # vector
 
-My non-exhaustive implementation of `std::vector` in `vector.h` for learning sake. Some `std::algorithms` threw at it in `algorithms.cpp`.
+My non-exhaustive implementation of `std::vector` in `vector.h` for learning's sake. Some `std::algorithms` threw at it in `algorithms.cpp`.
 
 ## Generative AI usage acknowledgement 
 
