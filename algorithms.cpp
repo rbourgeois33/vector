@@ -42,7 +42,7 @@ int main(){
     std::cout<<"seeded_sum= "<< seeded_sum<<std::endl;
 
 
-    int custom_sum = std::reduce(v.begin(), v.end(), 10, my_custom_op());
+    int custom_sum = std::reduce(v.begin(), v.end(), 10, my_custom_op()); //op is not associative: UB, result vary with impl & policy
     std::cout<<"custom_sum= "<< custom_sum<<std::endl;
 
     
@@ -68,17 +68,20 @@ int main(){
 
 
     std::cout<<"another vector\n";
+
     another_vector.print();
     vector<int> index(10), out(10);
+
     std::iota(index.begin(), index.end(), 0);
     index.print();
     std::sort(std::execution::par, index.begin(), index.end(), sort_according_to_another_vector{another_vector}); //no () there Oo
+    std::cout<<"sorted index:\n";
     index.print();
 
     //put back into out
-    std::transform(index.begin(), index.end(), v.begin(), [&](int i) { return v[i]; });
+    std::transform(index.begin(), index.end(), /*not v here !*/ out.begin(), [&](int i) { return v[i]; });
 
-    v.print();
+    out.print();
 
 
     //in place transformation
