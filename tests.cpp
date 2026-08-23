@@ -3338,3 +3338,605 @@ TEST(EmplaceBack, ContentsSurviveACopy) {
     EXPECT_EQ(b[0].c, "x");
 }
  
+// ---------------------------------------------------------------------------
+// resize — shrinking
+// ---------------------------------------------------------------------------
+
+TEST(Resize, SmallerReducesSize) {
+    vector<int> v(5, 7);
+    v.resize(2);
+    EXPECT_EQ(v.size(), 2u);
+    EXPECT_EQ(v[0], 7);
+    EXPECT_EQ(v[1], 7);
+}
+
+TEST(Resize, SmallerKeepsCapacityAndBuffer) {
+    // Shrinking must not reallocate: capacity and the pointer are unchanged.
+    // (reallocate_ also asserts new_cap >= size_, so routing a shrink through
+    // it would fire the assert.)
+    vector<int> v(10, 1);
+    const int* before = v.data();
+    const auto cap = v.capacity();
+
+    v.resize(3);
+
+    EXPECT_EQ(v.capacity(), cap) << "shrinking reallocated";
+    EXPECT_EQ(v.data(), before) << "shrinking moved the elements";
+}
+
+TEST(Resize, SmallerDestroysTheTail) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(8);
+        Tracked::dtors = 0;
+
+        v.resize(3);
+
+        EXPECT_EQ(Tracked::dtors, 5) << "the dropped elements were not destroyed";
+        EXPECT_EQ(Tracked::live, 3) << "rule II/III broken: dead or stale slots";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(Resize, SmallerReleasesTailResources) {
+    // ASan: the strings owned by the dropped elements must be freed exactly once.
+    vector<Owning> v(10, Owning("payload"));
+    v.resize(4);
+    EXPECT_EQ(v.size(), 4u);
+}
+
+TEST(Resize, SmallerLeavesRemainingElementsUntouched) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(6);
+        for (vector<Tracked>::size_type i = 0; i < v.size(); ++i) v[i].value = int(i);
+        Tracked::copy_ctors = 0;
+        Tracked::assignments = 0;
+        Tracked::default_ctors = 0;
+
+        v.resize(3);
+
+        EXPECT_EQ(Tracked::copy_ctors, 0) << "kept elements were rebuilt";
+        EXPECT_EQ(Tracked::assignments, 0) << "kept elements were reassigned";
+        EXPECT_EQ(Tracked::default_ctors, 0);
+        EXPECT_EQ(v[0].value, 0);
+        EXPECT_EQ(v[2].value, 2);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(Resize, ToZeroEmptiesButKeepsTheBuffer) {
+    // resize(0) is clear(), not destroy_all_(): the capacity survives.
+    vector<int> v(6, 3);
+    const auto cap = v.capacity();
+    const int* before = v.data();
+
+    v.resize(0);
+
+    EXPECT_EQ(v.size(), 0u);
+    EXPECT_TRUE(v.empty());
+    EXPECT_EQ(v.capacity(), cap) << "resize(0) released the buffer";
+    EXPECT_EQ(v.data(), before);
+}
+
+TEST(Resize, ToZeroRunsEveryDestructor) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(7);
+        v.resize(0);
+        EXPECT_EQ(Tracked::live, 0) << "resize(0) only adjusted size_";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(Resize, SmallerByOne) {
+    vector<int> v(4, 9);
+    v.resize(3);
+    EXPECT_EQ(v.size(), 3u);
+    EXPECT_EQ(v.back(), 9);
+}
+
+// ---------------------------------------------------------------------------
+// resize — growing
+// ---------------------------------------------------------------------------
+
+TEST(Resize, LargerIncreasesSize) {
+    vector<int> v(2, 5);
+    v.resize(6);
+    EXPECT_EQ(v.size(), 6u);
+    EXPECT_GE(v.capacity(), 6u) << "rule I broken: size_ > capacity_";
+}
+
+TEST(Resize, LargerValueInitializesTheNewElements) {
+    // The standard requires value-initialization: `new (p) T()`, not `new (p) T`.
+    // With `new (p) T` the appended ints hold whatever malloc handed back.
+    vector<int> v(3, 42);
+    v.resize(9);
+    for (vector<int>::size_type i = 3; i < 9; ++i)
+        EXPECT_EQ(v[i], 0) << "new element " << i << " was not value-initialized";
+}
+
+TEST(Resize, LargerValueInitializesAggregates) {
+    struct Pod { int a; double b; };
+    vector<Pod> v(2);
+    v.resize(5);
+    for (vector<Pod>::size_type i = 2; i < 5; ++i) {
+        EXPECT_EQ(v[i].a, 0);
+        EXPECT_EQ(v[i].b, 0.0);
+    }
+}
+
+TEST(Resize, LargerRunsOneDefaultCtorPerNewElement) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(3);
+        v.reserve(50);                 // isolate: no reallocation during the grow
+        Tracked::default_ctors = 0;
+        Tracked::copy_ctors = 0;
+
+        v.resize(10);
+
+        EXPECT_EQ(Tracked::default_ctors, 7) << "wrong number of new elements built";
+        EXPECT_EQ(Tracked::copy_ctors, 0) << "the new elements were copied from somewhere";
+        EXPECT_EQ(Tracked::live, 10);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(Resize, LargerPreservesTheExistingElements) {
+    vector<int> v;
+    for (int i = 0; i < 5; ++i) v.push_back(i);
+    v.resize(20);
+    for (int i = 0; i < 5; ++i) EXPECT_EQ(v[i], i) << "old element " << i << " was lost";
+    EXPECT_EQ(v[5], 0);
+}
+
+TEST(Resize, LargerDoesNotAssignToTheExistingElements) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(4);
+        v.reserve(50);
+        for (vector<Tracked>::size_type i = 0; i < v.size(); ++i) v[i].value = int(i) + 1;
+        Tracked::assignments = 0;
+
+        v.resize(12);
+
+        EXPECT_EQ(Tracked::assignments, 0) << "existing elements were touched";
+        EXPECT_EQ(v[3].value, 4);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(Resize, LargerWithinCapacityDoesNotReallocate) {
+    vector<int> v(3, 1);
+    v.reserve(100);
+    const int* before = v.data();
+
+    v.resize(80);
+
+    EXPECT_EQ(v.data(), before) << "reallocated even though the capacity was enough";
+    EXPECT_EQ(v.capacity(), 100u) << "capacity shrank on a grow";
+}
+
+TEST(Resize, LargerBeyondCapacityReallocates) {
+    vector<int> v(3, 1);
+    const int* before = v.data();
+
+    v.resize(100);
+
+    EXPECT_NE(v.data(), before) << "grew past capacity without a new buffer";
+    EXPECT_GE(v.capacity(), 100u);
+    EXPECT_EQ(v.size(), 100u);
+}
+
+TEST(Resize, GrowingFromAnUnallocatedVector) {
+    // data_ == nullptr and capacity_ == 0: the allocation path must trigger.
+    vector<int> v;
+    v.resize(4);
+    EXPECT_EQ(v.size(), 4u);
+    EXPECT_GE(v.capacity(), 4u);
+    EXPECT_NE(v.data(), nullptr) << "rule IV broken: capacity_ > 0 with a null data_";
+    EXPECT_EQ(v[0], 0);
+    EXPECT_EQ(v[3], 0);
+}
+
+TEST(Resize, LargerByOne) {
+    vector<int> v(1, 8);
+    v.resize(2);
+    EXPECT_EQ(v.size(), 2u);
+    EXPECT_EQ(v[0], 8);
+    EXPECT_EQ(v[1], 0);
+}
+
+TEST(Resize, ElementsRemainContiguous) {
+    vector<int> v(2, 1);
+    v.resize(10);
+    for (vector<int>::size_type i = 0; i < v.size(); ++i)
+        EXPECT_EQ(&v[i], v.data() + i) << "element " << i << " is not contiguous";
+}
+
+// ---------------------------------------------------------------------------
+// resize — same size
+// ---------------------------------------------------------------------------
+
+TEST(Resize, ToCurrentSizeIsANoOp) {
+    vector<int> v(5, 4);
+    const int* before = v.data();
+    const auto cap = v.capacity();
+
+    v.resize(5);
+
+    EXPECT_EQ(v.size(), 5u);
+    EXPECT_EQ(v.capacity(), cap);
+    EXPECT_EQ(v.data(), before);
+    EXPECT_EQ(v[4], 4);
+}
+
+TEST(Resize, ToCurrentSizeDoesNoElementWork) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(5);
+        Tracked::default_ctors = 0;
+        Tracked::copy_ctors = 0;
+        Tracked::dtors = 0;
+        Tracked::assignments = 0;
+
+        v.resize(5);
+
+        EXPECT_EQ(Tracked::default_ctors, 0);
+        EXPECT_EQ(Tracked::copy_ctors, 0);
+        EXPECT_EQ(Tracked::assignments, 0);
+        EXPECT_EQ(Tracked::dtors, 0) << "a same-size resize destroyed elements";
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(Resize, ZeroOnAnEmptyVectorIsANoOp) {
+    vector<int> v;
+    v.resize(0);
+    EXPECT_EQ(v.size(), 0u);
+    EXPECT_EQ(v.capacity(), 0u);
+    EXPECT_EQ(v.data(), nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// resize — how existing elements get transferred when it reallocates
+// ---------------------------------------------------------------------------
+
+TEST(Resize, MovesExistingElementsWhenTheMoveIsNoexcept) {
+    Movable::reset();
+    {
+        vector<Movable> v(6, Movable(1));
+        Movable::copies = 0;
+        Movable::moves = 0;
+
+        v.resize(100);
+
+        EXPECT_EQ(Movable::moves, 6) << "existing elements were not moved into the new buffer";
+        EXPECT_EQ(Movable::copies, 0) << "resize copied despite a noexcept move";
+    }
+    EXPECT_EQ(Movable::live, 0);
+}
+
+TEST(Resize, CopiesExistingElementsWhenTheMoveMayThrow) {
+    ThrowingMove::reset();
+    {
+        vector<ThrowingMove> v(6, ThrowingMove(1));
+        ThrowingMove::copies = 0;
+        ThrowingMove::moves = 0;
+
+        v.resize(100);
+
+        EXPECT_EQ(ThrowingMove::copies, 6) << "a throwing move was used for the transfer";
+        EXPECT_EQ(ThrowingMove::moves, 0);
+    }
+    EXPECT_EQ(ThrowingMove::live, 0);
+}
+
+TEST(Resize, DoesNotConstructBeyondTheNewSize) {
+    // If the growth policy overshoots (e.g. capacity 2*n), the slots between
+    // new_size and capacity_ must stay raw — rule III.
+    Tracked::reset();
+    {
+        vector<Tracked> v(2);
+        v.resize(9);
+        EXPECT_EQ(Tracked::live, 9) << "elements were built in the spare capacity";
+        EXPECT_EQ(v.size(), 9u);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(Resize, DestroysEachElementExactlyOnce) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(8);
+        v.resize(200);
+        v.resize(3);
+    }
+    EXPECT_EQ(Tracked::live, 0) << "elements were leaked or destroyed twice";
+}
+
+TEST(Resize, ReleasesTheOldBuffer) {
+    // ASan: the pre-resize buffer must be freed exactly once.
+    vector<Owning> v(10, Owning("payload"));
+    v.resize(500);
+    EXPECT_EQ(v.size(), 500u);
+}
+
+TEST(Resize, RepeatedGrowShrinkCyclesDoNotLeak) {
+    vector<Owning> v(4, Owning("payload"));
+    for (int i = 0; i < 6; ++i) {
+        v.resize(200);
+        v.resize(4);
+    }
+    EXPECT_EQ(v.size(), 4u);
+}
+
+// ---------------------------------------------------------------------------
+// resize — the shrink-then-grow trap
+// ---------------------------------------------------------------------------
+
+TEST(Resize, GrowingBackGivesFreshElementsNotStaleOnes) {
+    // The killer test for "resize just moves size_ around". After the shrink the
+    // tail slots are destroyed; growing back must construct new objects there,
+    // so the values are 0, not the old 1..5.
+    vector<int> v;
+    for (int i = 1; i <= 5; ++i) v.push_back(i);
+
+    v.resize(2);
+    v.resize(5);
+
+    EXPECT_EQ(v[0], 1);
+    EXPECT_EQ(v[1], 2);
+    EXPECT_EQ(v[2], 0) << "a destroyed slot was resurrected instead of rebuilt";
+    EXPECT_EQ(v[3], 0);
+    EXPECT_EQ(v[4], 0);
+}
+
+TEST(Resize, GrowingBackConstructsRatherThanResurrects) {
+    Tracked::reset();
+    {
+        vector<Tracked> v(6);
+        v.resize(2);
+        Tracked::default_ctors = 0;
+
+        v.resize(6);
+
+        EXPECT_EQ(Tracked::default_ctors, 4) << "the regrown slots were never constructed";
+        EXPECT_EQ(Tracked::live, 6);
+    }
+    EXPECT_EQ(Tracked::live, 0);
+}
+
+TEST(Resize, GrowingBackAfterShrinkDoesNotReallocate) {
+    vector<int> v(10, 1);
+    const int* before = v.data();
+    v.resize(3);
+    v.resize(10);
+    EXPECT_EQ(v.data(), before) << "the retained capacity was not reused";
+}
+
+TEST(Resize, GrowingBackWithOwningElementsIsClean) {
+    // ASan: rebuilding over slots whose destructors already ran must not
+    // double-free, and the second round of strings must not leak.
+    vector<Owning> v(8, Owning("payload"));
+    v.resize(2);
+    v.resize(8);
+    EXPECT_EQ(v.size(), 8u);
+}
+
+// ---------------------------------------------------------------------------
+// resize — exception safety
+// ---------------------------------------------------------------------------
+
+TEST(Resize, ThrowingElementCtorWithinCapacityRollsBack) {
+    // No reallocation here, so the strong guarantee is cheap: destroy the
+    // elements built so far and leave size_ where it was.
+    ThrowOnDefault::reset(/*budget=*/1000);
+    {
+        vector<ThrowOnDefault> v(5);
+        v.reserve(50);
+        const ThrowOnDefault* before = v.data();
+        const auto cap = v.capacity();
+
+        ThrowOnDefault::budget = 3;      // fails on the 4th of 10 appends
+        EXPECT_THROW({ v.resize(15); }, std::runtime_error);
+
+        EXPECT_EQ(v.size(), 5u) << "size_ was committed before the elements existed";
+        EXPECT_EQ(v.capacity(), cap);
+        EXPECT_EQ(v.data(), before);
+        EXPECT_EQ(ThrowOnDefault::live, 5) << "the partially built tail leaked";
+    }
+    EXPECT_EQ(ThrowOnDefault::live, 0);
+}
+
+TEST(Resize, ThrowingElementCtorDuringGrowthDoesNotLoseTheContents) {
+    // A reallocation happens first, then the appends throw. Whatever the design,
+    // the vector must still hold its original elements and be destructible.
+    // (Capacity may legitimately differ afterwards, so it is not asserted.)
+    ThrowOnDefault::reset(/*budget=*/1000);
+    {
+        vector<ThrowOnDefault> v(5);
+        for (vector<ThrowOnDefault>::size_type i = 0; i < v.size(); ++i) v[i].value = int(i) + 1;
+
+        ThrowOnDefault::budget = 2;
+        EXPECT_THROW({ v.resize(60); }, std::runtime_error);
+
+        EXPECT_EQ(v.size(), 5u) << "size_ lies about the appends that never happened";
+        EXPECT_EQ(v[0].value, 1) << "the original elements were damaged";
+        EXPECT_EQ(v[4].value, 5);
+        EXPECT_EQ(ThrowOnDefault::live, 5) << "elements leaked in the failed grow";
+    }
+    EXPECT_EQ(ThrowOnDefault::live, 0);
+}
+
+TEST(Resize, ThrowingTransferLeavesTheVectorUntouched) {
+    // The transfer copies (ThrowOnCopy has no move ctor), so the budget applies
+    // to the relocation itself: nothing may be committed.
+    ThrowOnCopy::reset(/*budget=*/1000);
+    {
+        ThrowOnCopy proto(1);
+        vector<ThrowOnCopy> v(10, proto);
+        const ThrowOnCopy* before = v.data();
+        const auto cap = v.capacity();
+        const int live_before = ThrowOnCopy::live;
+
+        ThrowOnCopy::budget = 4;         // fails on the 5th of 10 transfers
+        EXPECT_THROW({ v.resize(500); }, std::runtime_error);
+
+        EXPECT_EQ(v.size(), 10u) << "size changed after a failed resize";
+        EXPECT_EQ(v.capacity(), cap) << "capacity was committed before the transfer finished";
+        EXPECT_EQ(v.data(), before) << "the original buffer was released";
+        EXPECT_EQ(ThrowOnCopy::live, live_before) << "the partial buffer leaked";
+    }
+    EXPECT_EQ(ThrowOnCopy::live, 0);
+}
+
+TEST(Resize, VectorStillUsableAfterAFailedResize) {
+    ThrowOnDefault::reset(/*budget=*/1000);
+    {
+        vector<ThrowOnDefault> v(5);
+        ThrowOnDefault::budget = 2;
+        EXPECT_THROW({ v.resize(40); }, std::runtime_error);
+
+        ThrowOnDefault::budget = 1000;
+        v.resize(8);
+        EXPECT_EQ(v.size(), 8u) << "the vector was left in an unusable state";
+
+        v.resize(1);
+        EXPECT_EQ(v.size(), 1u);
+    }
+    EXPECT_EQ(ThrowOnDefault::live, 0);
+}
+
+TEST(Resize, ShrinkingNeverThrows) {
+    ThrowOnDefault::reset(/*budget=*/1000);
+    {
+        vector<ThrowOnDefault> v(10);
+        ThrowOnDefault::budget = 0;      // any default ctor would now throw
+        EXPECT_NO_THROW({ v.resize(2); });
+        EXPECT_EQ(v.size(), 2u) << "the shrink path built elements it did not need";
+    }
+    EXPECT_EQ(ThrowOnDefault::live, 0);
+}
+
+TEST(Resize, AboveMaxSizeThrowsLengthError) {
+    vector<int> v(3, 1);
+    EXPECT_THROW({ v.resize(v.max_size() + 1); }, std::length_error);
+    EXPECT_EQ(v.size(), 3u) << "the vector was modified before the check";
+    EXPECT_EQ(v[0], 1);
+}
+
+TEST(Resize, HugeButRepresentableRequestThrowsBadAlloc) {
+    // Needs ASAN_OPTIONS=allocator_may_return_null=1 to reach the null check.
+    vector<int> v(3, 1);
+    const auto huge = std::numeric_limits<vector<int>::size_type>::max() / sizeof(int) / 2;
+    EXPECT_THROW({ v.resize(huge); }, std::bad_alloc);
+    EXPECT_EQ(v.size(), 3u);
+    EXPECT_EQ(v[2], 1);
+}
+
+// ---------------------------------------------------------------------------
+// resize — interaction with the rest of the class
+// ---------------------------------------------------------------------------
+
+TEST(Resize, AccessorsAgreeAfterwards) {
+    vector<int> v(2, 6);
+    v.resize(5);
+    EXPECT_EQ(v.front(), 6);
+    EXPECT_EQ(v.back(), 0);
+    EXPECT_EQ(v.at(4), 0);
+    EXPECT_THROW({ v.at(5); }, std::out_of_range) << "at() still allows the dropped range";
+    EXPECT_EQ(v.end() - v.begin(), 5);
+}
+
+TEST(Resize, AtRespectsTheNewSmallerSize) {
+    vector<int> v(6, 1);
+    v.resize(2);
+    EXPECT_THROW({ v.at(2); }, std::out_of_range) << "at() reads past the new size";
+    EXPECT_THROW({ v.at(5); }, std::out_of_range);
+}
+
+TEST(Resize, PushBackAfterShrinkReusesTheBuffer) {
+    vector<int> v(10, 1);
+    v.resize(2);
+    const int* before = v.data();
+    v.push_back(99);
+    EXPECT_EQ(v.data(), before) << "push_back reallocated despite the retained capacity";
+    EXPECT_EQ(v.size(), 3u);
+    EXPECT_EQ(v.back(), 99);
+}
+
+TEST(Resize, PushBackAfterGrowthContinuesFromTheNewEnd) {
+    vector<int> v(2, 7);
+    v.resize(5);
+    v.push_back(99);
+    EXPECT_EQ(v.size(), 6u);
+    EXPECT_EQ(v[4], 0);
+    EXPECT_EQ(v[5], 99);
+}
+
+TEST(Resize, ShrinkToFitAfterAShrinkTrimsTheCapacity) {
+    vector<int> v(20, 1);
+    v.resize(3);
+    v.shrink_to_fit();
+    EXPECT_EQ(v.capacity(), 3u) << "resize left a capacity shrink_to_fit could not see";
+    EXPECT_EQ(v.size(), 3u);
+    EXPECT_EQ(v[2], 1);
+}
+
+TEST(Resize, WorksOnAMovedFromVector) {
+    vector<int> src(5, 2);
+    vector<int> dst(std::move(src));
+
+    src.resize(3);
+
+    EXPECT_EQ(src.size(), 3u);
+    EXPECT_EQ(src[0], 0);
+    EXPECT_EQ(dst.size(), 5u) << "the moved-to vector was disturbed";
+}
+
+TEST(Resize, ResultSurvivesACopy) {
+    vector<int> v(2, 4);
+    v.resize(5);
+    vector<int> copy(v);
+    EXPECT_EQ(copy.size(), 5u);
+    EXPECT_EQ(copy[0], 4);
+    EXPECT_EQ(copy[4], 0);
+    EXPECT_NE(copy.data(), v.data());
+}
+
+TEST(Resize, CopyAssignmentOverAResizedVector) {
+    vector<int> v(2, 1);
+    v.resize(30);
+    vector<int> other(3, 8);
+
+    v = other;
+
+    EXPECT_EQ(v.size(), 3u);
+    EXPECT_EQ(v[2], 8);
+    EXPECT_GE(v.capacity(), 3u);
+}
+
+TEST(Resize, NestedVectors) {
+    vector<vector<int>> v(2);
+    v[0].push_back(1);
+    v[1].push_back(2);
+
+    v.resize(4);
+
+    EXPECT_EQ(v.size(), 4u);
+    EXPECT_EQ(v[0].size(), 1u) << "the inner vectors did not survive the transfer";
+    EXPECT_EQ(v[0][0], 1);
+    EXPECT_EQ(v[2].size(), 0u) << "the appended inner vectors are not empty";
+    EXPECT_EQ(v[3].capacity(), 0u);
+}
+
+TEST(Resize, StringElementsAreProperlyValueInitialized) {
+    vector<std::string> v(2, std::string("hello"));
+    v.resize(5);
+    EXPECT_EQ(v[1], std::string("hello"));
+    EXPECT_TRUE(v[4].empty()) << "the appended strings are not empty";
+    v.resize(1);
+    EXPECT_EQ(v.size(), 1u);
+}

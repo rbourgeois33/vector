@@ -28,13 +28,7 @@ class vector{
     //default ctor
     vector() noexcept : data_(nullptr), size_(0), capacity_(0) /*same order as declaration in private */{}
 
-    //count ctor. Explicit needed because size_type -> std::vector<size_t> can happen
-    //explicit: no implicit conversion these could happen
-    //void print(const vector<int>& v);
-    //print(42);                 // compiles — builds a 42-element vector
-    //vector<int> v;
-    //v = 5;                     // compiles — temp vector of 5 zeros, then move-assign. 
-    //vector<int> w = 10;        // compiles — looks like "w holds the value 10"
+    //count ctor. Explicit explained in readme link
     explicit vector(size_type count) : data_(nullptr), size_(0), capacity_(0){ //not set to count here. State has to be consistent at all time
         
         T* ptr = allocate_raw_(count);
@@ -115,7 +109,7 @@ class vector{
     }
 
     //dtor
-    ~vector(){
+    ~vector() noexcept {
         destroy_all_();
     }
 
@@ -253,8 +247,8 @@ class vector{
         return *this; 
     }
 
-    //Move =
-    //= with a vector that is about to disappear same as constrcutor but we get rid of our stuff first.
+    //We destroy or state and steal the other's one
+    //other will be destroyed right after
     vector<T>& operator=(vector<T>&& other) noexcept{
         if (this == &other) return *this;
 
@@ -293,12 +287,12 @@ class vector{
         return std::numeric_limits<ptrdiff_t>::max() / sizeof(T);
     }
 
-    //only useful if (new_cap>capacity_)
+    //add some memory
     void reserve(size_type new_cap){
         if (new_cap>capacity_) reallocate_(new_cap);
     }
 
-    //causes reallocation !! only useful if (capacity_ > size_) 
+    //save some memory
     void shrink_to_fit(){
         if (capacity_ > size_) reallocate_(size_);
     }
@@ -315,29 +309,35 @@ class vector{
     //Appends a new element to the end of the container. The element is constructed through std::allocator_traits::construct, which typically uses placement-new to construct the element in-place 
     //at the location provided by the container. The arguments args... are forwarded to the constructor as std::forward<Args>(args).... 
     //If after the operation the new size() is greater than old capacity() a reallocation takes place,
-    // universal ref bc we might call copy or move ctor
-    //move_if_noexcept explained below
-    //done better than push back bc constructor is called just once
+    //universal ref bc we might call copy or move ctor
+    //We dont use realloc_ bc it's a special case where we add an element. By hand here
+    //5 steps (in case of realloc)
+    //1: create new allocation
+    //2: build the emplaced_back elementat the end of it to avoid aliasing
+    //3: copy/move the original data into it
+    //4: destroy previous alloc
+    //5: set new private members
     template< class... Args >
     reference emplace_back( Args&&... args ){
 
-        if (size_==capacity_){
+        if (size_==capacity_){ //realloc branch
 
+            //1
             size_t new_cap = new_cap_policy_();
             T* new_ptr = allocate_raw_(new_cap);
 
 
-            //to avoid aliasing issue if args is v[0], it will be moved later !!
+            //2
             try{
-                 new (new_ptr + size_) T(std::forward<Args>(args)...);
+                 new (new_ptr + size_) T(std::forward<Args>(args)...); //perfect forwarding to a ctor
             }catch(...){
                 //new_ptr[size_].~T();  no need, placement new threw
                 free(new_ptr);
                 throw;
             }
 
+            //3
             size_type built=0; 
-
             //Now the last element is built, we build the other, not a problem if data[built] corresponds to args and is moved now
             try {
                 for (;built<size_; built++){ 
@@ -350,11 +350,11 @@ class vector{
                 throw;
             }
 
-            //destroy current state
+            //4
             size_type old_size = size_;
-            destroy_all_(); // killing size is too mich here, we save it before hands
+            destroy_all_(); 
             
-            //update metatdata
+            //4
             //enforce II, III, V at the same time
             size_=old_size+1;
             data_=new_ptr; 
@@ -365,15 +365,73 @@ class vector{
 
         new (data_+size_) T(std::forward<Args>(args)...);
         size_+=1;
-        return data_[size_-1];
+        return data_[size_-1]; // return the emplaced element bc it's often used
     }
     //it's just a special case of emplace_back where the constructor is copy, and argument value
     void push_back( const T& value ){emplace_back(value);}
     
-    //Moved version
+    //Move version
     //call v.push_back(5). 5 is moved into value, has to be re-moved into emplace back
     void push_back(T&& value ){emplace_back(std::move(value));}
 
+
+    //Reallocate if more mem is needed
+    //If shrink: free lost elements
+    //if grows, allocate new elements
+    //If an exception is thrown for any reason, these functions have no effect (strong exception safety guarantee). Although not explicitly specified, std::length_error is thrown if the capacity required by the new vector would exceed max_size().
+    void resize(size_type new_size){
+        
+        if (new_size==size_) return;
+
+        if(new_size>capacity_){ //implies new_size > size_
+            //1
+            T* new_ptr = allocate_raw_(new_size);
+                
+            //2
+            size_type built=0; 
+            try {
+                for (;built<size_; built++){ //move/copy
+                    // move_if_noexcept: if T's move ctor is noexcept it moves, otherwise it copies
+                    // Why not move only ? if it can except, we free previously moved element and they will be refreed in the catch block
+                    // why not always copy ? If we can save some time by moveing it's faster.
+                    new (new_ptr + built) T(std::move_if_noexcept(data_[built])); //AI
+                }
+                for (;built<new_size; built++) {
+                    new (new_ptr + built) T(); //default init
+                }
+            }catch(...){ //destroy if anything happend, leave data untouched
+                    for (size_type j = 0; j < built; ++j) new_ptr[j].~T(); 
+                    free(new_ptr); 
+                    throw; 
+            }
+
+            //3
+            destroy_all_();
+                
+            //4
+            //enforce II, III, V at the same time
+            size_ = new_size;
+            data_=new_ptr; 
+            capacity_ = new_size;
+        }
+
+        size_type old_size = size_;
+
+        if (new_size>size_){
+            try{
+                for (;size_<new_size; size_++) {new (data_ + size_) T();} //build new
+            }catch(...){
+                for (;size_>old_size; size_--) {data_[size_-1].~T();} // if anything fail, destroy newly built, size is set to old_size
+                throw; 
+            }
+        } else {
+            try{
+                for (;size_>new_size; size_--) {data_[size_-1].~T();} // we assume dtor are noexcept otherwise complicated 
+            }catch(...){
+                throw; 
+            }
+        }
+    }
     // ============ iterators
 
     iterator       begin()       noexcept { return data_; }
@@ -386,26 +444,25 @@ class vector{
     // ============ whatever I want
 
     void print(){
-        
         for (size_t i = 0; i < size_-1; i++)
         {
             std::cout<<at(i)<<", ";
         }
-        
         std::cout<<at(size_-1)<<std::endl;
     }
-    // ============ private
 
     private:
         T* data_{nullptr};
         size_type size_{0u};
         size_type capacity_{0u};
 
+        //How vector chooses to ask for more memory.
+        //add is bad, realloc are expensive
         size_type new_cap_policy_(){
             return capacity_==0 ? 1:capacity_*2;
         }
 
-        //const here ! it does not touch internal state
+        //some checks around malloc
         T* allocate_raw_(size_type count) const{
             if (count==0) return nullptr;
             if (count > max_size()) throw std::length_error("too large"); //not >
@@ -414,7 +471,6 @@ class vector{
             return new_ptr;
         }
 
-        //deconstrut until size_
         void destroy_all_() noexcept {
             clear();
             if (data_) free(data_); // then rule IV
@@ -422,22 +478,28 @@ class vector{
             capacity_ = 0;
         }
 
-        //internally only used in push_back, emplace_back
-        //only occurence of move_if_noexcept
-        // Why not move only ? if it can except, we free previously moved element ## and they will be refreed
-        // why not always copy ? If we can save some time by moveing it's better
+        // reallocates the data into a new pointer, keeps size constant
+        // 4 steps: 
+        //1: create new allocation
+        //2: copy/move the original data into it
+        //3: destroy previous alloc
+        //4: set new private members
+      
         void reallocate_(size_type new_cap){
-            //Build new THEN destroy THEN metadata
-
+            
+            //1
             assert(new_cap>=size_);
             T* new_ptr = allocate_raw_(new_cap);
-                
+            
+            //2
             size_type built=0; 
             try {
                 for (;built<size_; built++){ 
-                // new (new_ptr+built) T(data_[built]); //Default initialized mistake because it rebuilds !! same as interview
+                    // move_if_noexcept: if T's move ctor is noexcept it moves, otherwise it copies
+                    // Why not move only ? if it can except, we free previously moved element and they will be refreed in the catch block
+                    // why not always copy ? If we can save some time by moveing it's faster.
                     new (new_ptr + built) T(std::move_if_noexcept(data_[built])); //AI
-                    // if T's move ctor is noexcept it moves, otherwise it copies
+                  
             }
             } catch(...){ // never happnes is move ctor is noexcept
                 for (size_type j = 0; j < built; ++j) new_ptr[j].~T(); 
@@ -445,11 +507,11 @@ class vector{
                 throw;
             }
 
-            //2 
-            size_type old_size = size_;
-            destroy_all_(); // killing size is too mich here, we save it before hands
-            
             //3
+            size_type old_size = size_;
+            destroy_all_();
+            
+            //4
             //enforce II, III, V at the same time
             size_ = old_size;
             data_=new_ptr; 
