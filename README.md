@@ -17,6 +17,7 @@ Almost no AI in `vector.h` (except small identified portions), while `tests.cpp`
 4. `data_==nullptr` <--> `capacity_=0`
 5. if `capacity_>0`,  `data_` is a pointer to a malloced piece of `capacity_*sizeof(T)` bytes.
 
+One of the main challenge is that these rules should hold even in exception are thrown by the various ctor/dtor called in the vector's methods.
 
 ### Aliasing in push_back, emplace_back
 Both push back and emplace back can have an aliasing problem if the argument passed is a reference to an element of the vector an a reallocation is needed.
