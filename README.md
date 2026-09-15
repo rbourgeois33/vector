@@ -32,4 +32,6 @@ Both push back and emplace back can have an aliasing problem if the argument pas
 - [noexcept](https://godbolt.org/z/ovr1cb375)
 - [std::forward](https://godbolt.org/z/Po81o6rWz)
 - [std::sort](https://godbolt.org/z/444YTa1rM)
+- [type traits](https://godbolt.org/z/fb6fsWPTf)
+- [std::expected](https://godbolt.org/z/vrzxW4jrb)
   
